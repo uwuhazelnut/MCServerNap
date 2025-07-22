@@ -5,11 +5,11 @@ use tokio::net::TcpListener;
 use tokio::time::Duration;
 
 // Import core functions from the library crate
-use mc_server_ondemand::{idle_watchdog_rcon, launch_server, send_stop_command, wait_for_login};
+use mcservernap::{idle_watchdog_rcon, launch_server, send_stop_command, wait_for_login};
 
 /// "Serverless" Minecraft Server Watcher
 #[derive(Parser)]
-#[command(name = "mc-server-ondemand")]
+#[command(name = "mcservernap")]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
