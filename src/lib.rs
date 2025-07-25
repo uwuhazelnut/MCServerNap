@@ -64,6 +64,7 @@ pub async fn wait_for_login(listener: &TcpListener) -> Result<()> {
         log::debug!("Received {} bytes: {:02X?}", n, &buf[..n]);
 
         // 3) Parse handshake packet (packet ID = 0, next_state = 2)
+        // More information on the handshake packet structure: https://minecraft.wiki/w/Java_Edition_protocol/Packets#Handshaking
         // Skip packet length VarInt
         let (_pkt_len, off1) = match read_varint(&buf[..n]) {
             Some(v) => v,
@@ -100,7 +101,7 @@ pub async fn wait_for_login(listener: &TcpListener) -> Result<()> {
         // Skip the port (2 bytes)
         offset += 2;
 
-        // Finally read next_state VarInt
+        // Finally read next_state (intent) VarInt
         if offset >= n {
             continue;
         }
