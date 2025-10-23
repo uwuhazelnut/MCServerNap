@@ -2,11 +2,11 @@ use anyhow::Result;
 use rcon::Connection;
 use regex::Regex;
 use std::io::ErrorKind;
-use tokio::io::AsyncReadExt;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::time::{Duration, Instant, interval};
 
-/// Read a VarInt from the buffer, returning (value, bytes_read). Returns None if malformed
+/// Read a VarInt (Minecraft format) from the buffer, returning (value, bytes_read). Returns None if malformed
 fn read_varint(buf: &[u8]) -> Option<(i32, usize)> {
     let mut num_read = 0;
     let mut result = 0i32;
@@ -22,6 +22,19 @@ fn read_varint(buf: &[u8]) -> Option<(i32, usize)> {
         }
     }
     None
+}
+
+// Write a VarInt (Minecraft format)
+pub fn write_varint(mut val: i32, buf: &mut Vec<u8>) {
+    loop {
+        if (val & !0x7F) == 0 {
+            buf.push(val as u8);
+            return;
+        } else {
+            buf.push(((val & 0x7F) | 0x80) as u8);
+            val >>= 7;
+        }
+    }
 }
 
 /// Waits for a full Minecraft LoginStart handshake (state = Login) on an existing listener,
@@ -208,5 +221,28 @@ pub async fn send_stop_command(rcon_addr: &str, rcon_pass: &str) -> Result<()> {
     let mut conn = Connection::<TcpStream>::connect(rcon_addr, rcon_pass).await?;
     let _ = conn.cmd("stop").await?;
     log::info!("Stop command sent.");
+    Ok(())
+}
+
+pub async fn send_starting_message(mut socket: TcpStream) -> Result<()> {
+    let json_msg = r#"{"text":"Server is starting, please wait..."}"#;
+    let mut packet_data = Vec::new();
+
+    //Packet ID 0x00 (login disconnect)
+    write_varint(0, &mut packet_data);
+
+    write_varint(json_msg.len() as i32, &mut packet_data);
+    packet_data.extend_from_slice(json_msg.as_bytes());
+
+    let mut packet = Vec::new();
+    write_varint(packet_data.len() as i32, &mut packet);
+    packet.extend_from_slice(&packet_data);
+
+    socket.write_all(&packet).await?;
+
+    // Wait a short moment to let client consume data (required because otherwise client doesn't display json message)
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    socket.shutdown().await?;
     Ok(())
 }
