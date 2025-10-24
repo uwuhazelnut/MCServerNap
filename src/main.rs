@@ -76,6 +76,7 @@ async fn main() -> Result<()> {
             loop {
                 // Bind listener every loop iteration because we drop listener inside the loop
                 let listener = TcpListener::bind(addr).await?;
+                log::info!("Listening for login on {}", addr);
 
                 let (mut socket, peer) = listener.accept().await?;
                 log::info!("Incoming TCP connection from {}", peer);
