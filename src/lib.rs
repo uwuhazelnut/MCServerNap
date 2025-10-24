@@ -2,8 +2,9 @@ use anyhow::Result;
 use rcon::Connection;
 use regex::Regex;
 use std::io::ErrorKind;
+use std::net::SocketAddr;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpListener, TcpStream};
+use tokio::net::TcpStream;
 use tokio::time::{Duration, Instant, interval};
 
 /// Read a VarInt (Minecraft format) from the buffer, returning (value, bytes_read). Returns None if malformed
@@ -37,98 +38,80 @@ pub fn write_varint(mut val: i32, buf: &mut Vec<u8>) {
     }
 }
 
-/// Waits for a full Minecraft LoginStart handshake (state = Login) on an existing listener,
-/// not just a status ping. The listener should be bound once by the caller.
-pub async fn wait_for_login(listener: &TcpListener) -> Result<()> {
-    let addr = listener.local_addr()?;
-    log::info!("Listening for login on {}", addr);
-
-    loop {
-        // 1) Accept new TCP connection, ignoring transient errors
-        let (mut socket, peer) = match listener.accept().await {
-            Ok(pair) => {
-                log::info!("Incoming TCP connection from {}", pair.1);
-                pair
-            }
-            Err(e) => {
-                log::warn!("Failed to accept connection: {} (retrying)", e);
-                continue;
-            }
-        };
-
-        // 2) Read initial data, ignoring resets or immediate closes
-        let mut buf = [0u8; 512];
-        let n = match socket.read(&mut buf).await {
-            Ok(0) => {
-                log::debug!("Connection closed immediately by {}", peer);
-                continue;
-            }
-            Ok(n) => n,
-            Err(e) if e.kind() == ErrorKind::ConnectionReset => {
-                log::debug!("Connection reset by peer {} (ignoring)", peer);
-                continue;
-            }
-            Err(e) => {
-                // Unexpected I/O error, propagate
-                return Err(e.into());
-            }
-        };
-
-        log::debug!("Received {} bytes: {:02X?}", n, &buf[..n]);
-
-        // 3) Parse handshake packet (packet ID = 0, next_state = 2)
-        // More information on the handshake packet structure: https://minecraft.wiki/w/Java_Edition_protocol/Packets#Handshaking
-        // Skip packet length VarInt
-        let (_pkt_len, off1) = match read_varint(&buf[..n]) {
-            Some(v) => v,
-            None => continue,
-        };
-        // Packet ID VarInt
-        let (pkt_id, off2) = match read_varint(&buf[off1..n]) {
-            Some(v) => v,
-            None => continue,
-        };
-        if pkt_id != 0 {
-            // not a handshake packet
-            continue;
+// Verifies a full Minecraft LoginStart handshake (state = Login) on a single TcpStream.
+pub async fn verify_login_handshake(socket: &mut TcpStream, peer: SocketAddr) -> Result<bool> {
+    // 1) Read initial data, ignoring resets or immediate closes
+    let mut buf = [0u8; 512];
+    let n = match socket.read(&mut buf).await {
+        Ok(0) => {
+            log::debug!("Connection closed immediately by {}", peer);
+            return Ok(false);
         }
-
-        // Skip protocol version VarInt
-        let mut offset = off1 + off2;
-        let (_protocol_version, len) = match read_varint(&buf[offset..n]) {
-            Some(v) => v,
-            None => continue,
-        };
-        offset += len;
-
-        // Read address length and skip the address string
-        let (addr_len, len) = match read_varint(&buf[offset..n]) {
-            Some(v) => v,
-            None => continue,
-        };
-        if addr_len < 0 {
-            continue;
+        Ok(n) => n,
+        Err(e) if e.kind() == ErrorKind::ConnectionReset => {
+            log::debug!("Connection reset by peer {} (ignoring)", peer);
+            return Ok(false);
         }
-        offset += len + addr_len as usize;
-
-        // Skip the port (2 bytes)
-        offset += 2;
-
-        // Finally read next_state (intent) VarInt
-        if offset >= n {
-            continue;
+        Err(e) => {
+            // Unexpected I/O error, propagate
+            return Err(e.into());
         }
-        if let Some((next_state, _)) = read_varint(&buf[offset..n]) {
-            if next_state == 2 {
-                log::info!("Login handshake detected from {}", peer);
-                break;
-            } else {
-                log::debug!("Status ping from {}, ignoring", peer);
-            }
+    };
+
+    log::debug!("Received {} bytes: {:02X?}", n, &buf[..n]);
+
+    // 2) Parse handshake packet (packet ID = 0, next_state = 2)
+    // More information on the handshake packet structure: https://minecraft.wiki/w/Java_Edition_protocol/Packets#Handshaking
+    // Skip packet length VarInt
+    let (_pkt_len, off1) = match read_varint(&buf[..n]) {
+        Some(v) => v,
+        None => return Ok(false),
+    };
+    // Packet ID VarInt
+    let (pkt_id, off2) = match read_varint(&buf[off1..n]) {
+        Some(v) => v,
+        None => return Ok(false),
+    };
+    if pkt_id != 0 {
+        // not a handshake packet
+        return Ok(false);
+    }
+
+    // Skip protocol version VarInt
+    let mut offset = off1 + off2;
+    let (_protocol_version, len) = match read_varint(&buf[offset..n]) {
+        Some(v) => v,
+        None => return Ok(false),
+    };
+    offset += len;
+
+    // Read address length and skip the address string
+    let (addr_len, len) = match read_varint(&buf[offset..n]) {
+        Some(v) => v,
+        None => return Ok(false),
+    };
+    if addr_len < 0 {
+        return Ok(false);
+    }
+    offset += len + addr_len as usize;
+
+    // Skip the port (2 bytes)
+    offset += 2;
+
+    // Read next_state (intent) VarInt
+    if offset >= n {
+        return Ok(false);
+    }
+    if let Some((next_state, _)) = read_varint(&buf[offset..n]) {
+        if next_state == 2 {
+            log::info!("Login handshake detected from {}", peer);
+            return Ok(true);
+        } else {
+            log::debug!("Status ping from {}, ignoring", peer);
         }
     }
 
-    Ok(())
+    Ok(false)
 }
 
 /// Launches the Minecraft server process with given command.
