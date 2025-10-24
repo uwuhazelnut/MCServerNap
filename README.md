@@ -11,8 +11,8 @@
 * Watching the server via RCON for player activity.
 * Stopping the server after an idle timeout.
 
-<img width="657" height="94" alt="2025-10-24_18 54 35" src="https://github.com/user-attachments/assets/dae15e22-849e-4469-bae9-df17cc94636b" />
-<img width="966" height="261" alt="2025-10-24_18 54 41" src="https://github.com/user-attachments/assets/ca128f11-5e7a-4666-a03c-6d56235385db" />
+<img width="657" height="94" alt="screenshot of server browser view" src="https://github.com/user-attachments/assets/dae15e22-849e-4469-bae9-df17cc94636b" />
+<img width="966" height="261" alt="screenshot of connect message" src="https://github.com/user-attachments/assets/ca128f11-5e7a-4666-a03c-6d56235385db" />
 
 
 There is also a `stop` subcommand to immediately send a `/stop` command via RCON.
