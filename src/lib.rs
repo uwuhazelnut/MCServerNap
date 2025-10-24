@@ -38,8 +38,8 @@ pub fn write_varint(mut val: i32, buf: &mut Vec<u8>) {
     }
 }
 
-// Verifies a full Minecraft LoginStart handshake (state = Login) on a single TcpStream.
-pub async fn verify_login_handshake(socket: &mut TcpStream, peer: SocketAddr) -> Result<bool> {
+// Verifies a full Minecraft handshake on a single TcpStream.
+pub async fn verify_handshake_packet(socket: &mut TcpStream, peer: SocketAddr) -> Result<bool> {
     // 1) Read initial data, ignoring resets or immediate closes
     let mut buf = [0u8; 512];
     let n = match socket.read(&mut buf).await {
@@ -103,11 +103,14 @@ pub async fn verify_login_handshake(socket: &mut TcpStream, peer: SocketAddr) ->
         return Ok(false);
     }
     if let Some((next_state, _)) = read_varint(&buf[offset..n]) {
-        if next_state == 2 {
+        if next_state == 1 { // Status ping
+            handle_status_ping(socket).await?;
+            return Ok(false);
+        } else if next_state == 2 { // Login handshake
             log::info!("Login handshake detected from {}", peer);
             return Ok(true);
         } else {
-            log::debug!("Status ping from {}, ignoring", peer);
+            log::debug!("Unknown type of ping from {}, ignoring", peer);
         }
     }
 
@@ -208,7 +211,11 @@ pub async fn send_stop_command(rcon_addr: &str, rcon_pass: &str) -> Result<()> {
 }
 
 pub async fn send_starting_message(mut socket: TcpStream) -> Result<()> {
-    let json_msg = r#"{"text":"Server is starting, please wait..."}"#;
+    let json_msg = r#"{
+    "text":"Server is now starting up. Please wait and try again shortly...",
+    "color":"light_purple",
+    "bold":true
+    }"#;
     let mut packet_data = Vec::new();
 
     //Packet ID 0x00 (login disconnect)
@@ -226,6 +233,37 @@ pub async fn send_starting_message(mut socket: TcpStream) -> Result<()> {
     // Wait a short moment to let client consume data (required because otherwise client doesn't display json message)
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
+    socket.shutdown().await?;
+    Ok(())
+}
+
+async fn handle_status_ping(socket: &mut TcpStream) -> Result<()> {
+    // Read and discard the next packet (packet ID 0, status request)
+    let mut buf = [0u8; 512];
+    let _n = socket.read(&mut buf).await?;
+
+    // Create custom MOTD JSON
+    // Protocol is "an integer used to check for incompatibilities between the player's client and the server
+    // they are trying to connect to.". 766 = Minecraft 1.20.5 (https://minecraft.fandom.com/wiki/Protocol_version)
+    let motd_json = r#"{
+        "version":{"name":"MCServerNap (1.20.5)","protocol":766},
+        "players":{"max":0,"online":0,"sample":[]},
+        "description":{"text":"Napping... Join to start server","color":"aqua","bold":true}
+    }"#;
+
+    // Create status response packet
+    let mut data = Vec::new();
+    // Packet ID = 0 (status response)
+    write_varint(0, &mut data);
+    write_varint(motd_json.len() as i32, &mut data);
+    data.extend_from_slice(motd_json.as_bytes());
+
+    let mut packet = Vec::new();
+    write_varint(data.len() as i32, &mut packet);
+    packet.extend_from_slice(&data);
+
+    // Send to client
+    socket.write_all(&packet).await?;
     socket.shutdown().await?;
     Ok(())
 }

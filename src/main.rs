@@ -8,9 +8,7 @@ use tokio::net::TcpListener;
 use tokio::time::Duration;
 
 // Import core functions from the library crate
-use mcservernap::{
-    idle_watchdog_rcon, launch_server, send_stop_command, verify_login_handshake
-};
+use mcservernap::{idle_watchdog_rcon, launch_server, send_stop_command, verify_handshake_packet};
 
 /// "Serverless" Minecraft Server Watcher
 #[derive(Parser)]
@@ -82,7 +80,7 @@ async fn main() -> Result<()> {
                 let (mut socket, peer) = listener.accept().await?;
                 log::info!("Incoming TCP connection from {}", peer);
 
-                match verify_login_handshake(&mut socket, peer).await {
+                match verify_handshake_packet(&mut socket, peer).await {
                     Ok(true) => {
                         if !server_running.load(Ordering::SeqCst) {
                             // Server is offline: notify player client
@@ -92,7 +90,7 @@ async fn main() -> Result<()> {
                             }
                             // Launch server now
                             server_running.store(true, Ordering::SeqCst);
-                            drop(listener);
+                            drop(listener); // To-Do: DELAY LISTENER DROP UNTIL SERVER HAS STARTED OR ELSE THE USER GETS A CONNECTION ERROR IF THEY RECONNECT TOO EARLY
                             let mut child = launch_server(&cmd, &arg_slices)?;
 
                             let rcon_addr_clone = rcon_addr.clone();
@@ -126,9 +124,9 @@ async fn main() -> Result<()> {
                             // Close socket if not proxying, or handle connection if proxying.
                             socket.shutdown().await?;
                         }
-                    },
+                    }
                     Ok(false) => continue, // Not a login handshake, ignore
-                    Err(_) => continue // Wait for next connection
+                    Err(_) => continue,    // Wait for next connection
                 }
             }
         }
