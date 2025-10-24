@@ -75,6 +75,7 @@ mcservernap listen 0.0.0.0 25565 java -Xmx5G -Xms5G -jar server.jar nogui --rcon
 ```bash
 mcservernap listen 0.0.0.0 25565 "C:\path\to\your\script\start_server.bat" --rcon-port 25575 --rcon-pass rconpasswordmeow
 ```
+**IMPORTANT: When using a script, make sure the script closes its window at the end of the script (Windows .bat example: `exit`), or else this application won't detect that the Minecraft server process has shut down!**
 
 Once a client sends a LoginStart packet, the tool:
 
