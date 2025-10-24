@@ -1,11 +1,14 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use std::net::SocketAddr;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use tokio::io::AsyncWriteExt;
 use tokio::net::TcpListener;
 use tokio::time::Duration;
 
 // Import core functions from the library crate
-use mcservernap::{idle_watchdog_rcon, launch_server, send_stop_command, wait_for_login};
+use mcservernap::{idle_watchdog_rcon, launch_server, send_stop_command, verify_handshake_packet};
 
 /// "Serverless" Minecraft Server Watcher
 #[derive(Parser)]
@@ -68,41 +71,63 @@ async fn main() -> Result<()> {
             let arg_slices: Vec<&str> = args.iter().map(String::as_str).collect();
             let rcon_addr = format!("127.0.0.1:{}", rcon_port);
             let rcon_pass_clone = rcon_pass.clone();
+            let server_running = Arc::new(AtomicBool::new(false));
 
             loop {
-                // Bind listener fresh every loop iteration
+                // Bind listener every loop iteration because we drop listener inside the loop
                 let listener = TcpListener::bind(addr).await?;
 
-                log::info!("Waiting for player login to start on {}", addr);
-                wait_for_login(&listener).await?;
+                let (mut socket, peer) = listener.accept().await?;
+                log::info!("Incoming TCP connection from {}", peer);
 
-                // Drop listener to free port before starting server
-                drop(listener);
+                match verify_handshake_packet(&mut socket, peer).await {
+                    Ok(true) => {
+                        if !server_running.load(Ordering::SeqCst) {
+                            // Server is offline: notify player client
+                            log::info!("Notifying {} (server offline)", peer);
+                            if let Err(e) = mcservernap::send_starting_message(socket).await {
+                                log::warn!("Failed to notify {}: {}", peer, e);
+                            }
+                            // Launch server now
+                            server_running.store(true, Ordering::SeqCst);
+                            drop(listener); // To-Do: DELAY LISTENER DROP UNTIL SERVER HAS STARTED OR ELSE THE USER GETS A CONNECTION ERROR IF THEY RECONNECT TOO EARLY
+                            let mut child = launch_server(&cmd, &arg_slices)?;
 
-                log::info!("Login detected, launching server...");
-                let mut child = launch_server(&cmd, &arg_slices)?;
+                            let rcon_addr_clone = rcon_addr.clone();
+                            let rcon_pass_inner = rcon_pass_clone.clone();
+                            tokio::spawn(async move {
+                                if let Err(e) = idle_watchdog_rcon(
+                                    &rcon_addr_clone,
+                                    &rcon_pass_inner,
+                                    Duration::from_secs(60), // 1 minute check interval
+                                    Duration::from_secs(600), // 10 minutes idle timeout
+                                )
+                                .await
+                                {
+                                    log::error!("Idle watchdog error: {}", e);
+                                }
+                            });
 
-                let rcon_addr_clone = rcon_addr.clone();
-                let rcon_pass_inner = rcon_pass_clone.clone();
-                tokio::spawn(async move {
-                    if let Err(e) = idle_watchdog_rcon(
-                        &rcon_addr_clone,
-                        &rcon_pass_inner,
-                        Duration::from_secs(60), // 1 minute check interval
-                        Duration::from_secs(600), // 10 minutes idle timeout
-                    )
-                    .await
-                    {
-                        log::error!("Idle watchdog error: {}", e);
+                            // Wait for server exit
+                            match child.wait() {
+                                Ok(_) => log::info!("Server exited"),
+                                Err(e) => log::error!("Failed to wait: {:?}", e),
+                            }
+                            server_running.store(false, Ordering::SeqCst);
+                            log::info!(
+                                "Server stopped. Restarting listener for next connection..."
+                            );
+                        } else {
+                            // Server is running:
+                            // (Maybe forward the raw TCP to the actual server, to proxy direct connections)
+                            log::info!("Server running; player client should retry.");
+                            // Close socket if not proxying, or handle connection if proxying.
+                            socket.shutdown().await?;
+                        }
                     }
-                });
-
-                match child.wait() {
-                    Ok(status) => log::info!("Server exited with status {:?}", status),
-                    Err(e) => log::error!("Failed to wait for server: {:?}", e),
+                    Ok(false) => continue, // Not a login handshake, ignore
+                    Err(_) => continue,    // Wait for next connection
                 }
-
-                log::info!("Server stopped. Restarting listener for next connection...");
             }
         }
         Commands::Stop {

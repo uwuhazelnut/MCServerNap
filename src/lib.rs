@@ -2,11 +2,12 @@ use anyhow::Result;
 use rcon::Connection;
 use regex::Regex;
 use std::io::ErrorKind;
-use tokio::io::AsyncReadExt;
-use tokio::net::{TcpListener, TcpStream};
+use std::net::SocketAddr;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpStream;
 use tokio::time::{Duration, Instant, interval};
 
-/// Read a VarInt from the buffer, returning (value, bytes_read). Returns None if malformed
+/// Read a VarInt (Minecraft format) from the buffer, returning (value, bytes_read). Returns None if malformed
 fn read_varint(buf: &[u8]) -> Option<(i32, usize)> {
     let mut num_read = 0;
     let mut result = 0i32;
@@ -24,98 +25,96 @@ fn read_varint(buf: &[u8]) -> Option<(i32, usize)> {
     None
 }
 
-/// Waits for a full Minecraft LoginStart handshake (state = Login) on an existing listener,
-/// not just a status ping. The listener should be bound once by the caller.
-pub async fn wait_for_login(listener: &TcpListener) -> Result<()> {
-    let addr = listener.local_addr()?;
-    log::info!("Listening for login on {}", addr);
-
+// Write a VarInt (Minecraft format)
+pub fn write_varint(mut val: i32, buf: &mut Vec<u8>) {
     loop {
-        // 1) Accept new TCP connection, ignoring transient errors
-        let (mut socket, peer) = match listener.accept().await {
-            Ok(pair) => {
-                log::info!("Incoming TCP connection from {}", pair.1);
-                pair
-            }
-            Err(e) => {
-                log::warn!("Failed to accept connection: {} (retrying)", e);
-                continue;
-            }
-        };
-
-        // 2) Read initial data, ignoring resets or immediate closes
-        let mut buf = [0u8; 512];
-        let n = match socket.read(&mut buf).await {
-            Ok(0) => {
-                log::debug!("Connection closed immediately by {}", peer);
-                continue;
-            }
-            Ok(n) => n,
-            Err(e) if e.kind() == ErrorKind::ConnectionReset => {
-                log::debug!("Connection reset by peer {} (ignoring)", peer);
-                continue;
-            }
-            Err(e) => {
-                // Unexpected I/O error, propagate
-                return Err(e.into());
-            }
-        };
-
-        log::debug!("Received {} bytes: {:02X?}", n, &buf[..n]);
-
-        // 3) Parse handshake packet (packet ID = 0, next_state = 2)
-        // More information on the handshake packet structure: https://minecraft.wiki/w/Java_Edition_protocol/Packets#Handshaking
-        // Skip packet length VarInt
-        let (_pkt_len, off1) = match read_varint(&buf[..n]) {
-            Some(v) => v,
-            None => continue,
-        };
-        // Packet ID VarInt
-        let (pkt_id, off2) = match read_varint(&buf[off1..n]) {
-            Some(v) => v,
-            None => continue,
-        };
-        if pkt_id != 0 {
-            // not a handshake packet
-            continue;
+        if (val & !0x7F) == 0 {
+            buf.push(val as u8);
+            return;
+        } else {
+            buf.push(((val & 0x7F) | 0x80) as u8);
+            val >>= 7;
         }
+    }
+}
 
-        // Skip protocol version VarInt
-        let mut offset = off1 + off2;
-        let (_protocol_version, len) = match read_varint(&buf[offset..n]) {
-            Some(v) => v,
-            None => continue,
-        };
-        offset += len;
-
-        // Read address length and skip the address string
-        let (addr_len, len) = match read_varint(&buf[offset..n]) {
-            Some(v) => v,
-            None => continue,
-        };
-        if addr_len < 0 {
-            continue;
+// Verifies a full Minecraft handshake on a single TcpStream.
+pub async fn verify_handshake_packet(socket: &mut TcpStream, peer: SocketAddr) -> Result<bool> {
+    // 1) Read initial data, ignoring resets or immediate closes
+    let mut buf = [0u8; 512];
+    let n = match socket.read(&mut buf).await {
+        Ok(0) => {
+            log::debug!("Connection closed immediately by {}", peer);
+            return Ok(false);
         }
-        offset += len + addr_len as usize;
-
-        // Skip the port (2 bytes)
-        offset += 2;
-
-        // Finally read next_state (intent) VarInt
-        if offset >= n {
-            continue;
+        Ok(n) => n,
+        Err(e) if e.kind() == ErrorKind::ConnectionReset => {
+            log::debug!("Connection reset by peer {} (ignoring)", peer);
+            return Ok(false);
         }
-        if let Some((next_state, _)) = read_varint(&buf[offset..n]) {
-            if next_state == 2 {
-                log::info!("Login handshake detected from {}", peer);
-                break;
-            } else {
-                log::debug!("Status ping from {}, ignoring", peer);
-            }
+        Err(e) => {
+            // Unexpected I/O error, propagate
+            return Err(e.into());
+        }
+    };
+
+    log::debug!("Received {} bytes: {:02X?}", n, &buf[..n]);
+
+    // 2) Parse handshake packet (packet ID = 0, next_state = 2)
+    // More information on the handshake packet structure: https://minecraft.wiki/w/Java_Edition_protocol/Packets#Handshaking
+    // Skip packet length VarInt
+    let (_pkt_len, off1) = match read_varint(&buf[..n]) {
+        Some(v) => v,
+        None => return Ok(false),
+    };
+    // Packet ID VarInt
+    let (pkt_id, off2) = match read_varint(&buf[off1..n]) {
+        Some(v) => v,
+        None => return Ok(false),
+    };
+    if pkt_id != 0 {
+        // not a handshake packet
+        return Ok(false);
+    }
+
+    // Skip protocol version VarInt
+    let mut offset = off1 + off2;
+    let (_protocol_version, len) = match read_varint(&buf[offset..n]) {
+        Some(v) => v,
+        None => return Ok(false),
+    };
+    offset += len;
+
+    // Read address length and skip the address string
+    let (addr_len, len) = match read_varint(&buf[offset..n]) {
+        Some(v) => v,
+        None => return Ok(false),
+    };
+    if addr_len < 0 {
+        return Ok(false);
+    }
+    offset += len + addr_len as usize;
+
+    // Skip the port (2 bytes)
+    offset += 2;
+
+    // Read next_state (intent) VarInt
+    if offset >= n {
+        return Ok(false);
+    }
+    if let Some((next_state, _)) = read_varint(&buf[offset..n]) {
+        if next_state == 1 { // Status ping
+            handle_status_ping(socket).await?;
+            return Ok(false);
+        } else if next_state == 2 { // Login handshake
+            log::info!("Login handshake detected from {}", peer);
+            return Ok(true);
+        } else {
+            log::debug!("Unknown type of ping from {}, ignoring", peer);
         }
     }
 
-    Ok(())
+    Ok(false)
 }
 
 /// Launches the Minecraft server process with given command.
@@ -208,5 +207,63 @@ pub async fn send_stop_command(rcon_addr: &str, rcon_pass: &str) -> Result<()> {
     let mut conn = Connection::<TcpStream>::connect(rcon_addr, rcon_pass).await?;
     let _ = conn.cmd("stop").await?;
     log::info!("Stop command sent.");
+    Ok(())
+}
+
+pub async fn send_starting_message(mut socket: TcpStream) -> Result<()> {
+    let json_msg = r#"{
+    "text":"Server is now starting up. Please wait and try again shortly...",
+    "color":"light_purple",
+    "bold":true
+    }"#;
+    let mut packet_data = Vec::new();
+
+    //Packet ID 0x00 (login disconnect)
+    write_varint(0, &mut packet_data);
+
+    write_varint(json_msg.len() as i32, &mut packet_data);
+    packet_data.extend_from_slice(json_msg.as_bytes());
+
+    let mut packet = Vec::new();
+    write_varint(packet_data.len() as i32, &mut packet);
+    packet.extend_from_slice(&packet_data);
+
+    socket.write_all(&packet).await?;
+
+    // Wait a short moment to let client consume data (required because otherwise client doesn't display json message)
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    socket.shutdown().await?;
+    Ok(())
+}
+
+async fn handle_status_ping(socket: &mut TcpStream) -> Result<()> {
+    // Read and discard the next packet (packet ID 0, status request)
+    let mut buf = [0u8; 512];
+    let _n = socket.read(&mut buf).await?;
+
+    // Create custom MOTD JSON
+    // Protocol is "an integer used to check for incompatibilities between the player's client and the server
+    // they are trying to connect to.". 766 = Minecraft 1.20.5 (https://minecraft.fandom.com/wiki/Protocol_version)
+    let motd_json = r#"{
+        "version":{"name":"MCServerNap (1.20.5)","protocol":766},
+        "players":{"max":0,"online":0,"sample":[]},
+        "description":{"text":"Napping... Join to start server","color":"aqua","bold":true}
+    }"#;
+
+    // Create status response packet
+    let mut data = Vec::new();
+    // Packet ID = 0 (status response)
+    write_varint(0, &mut data);
+    write_varint(motd_json.len() as i32, &mut data);
+    data.extend_from_slice(motd_json.as_bytes());
+
+    let mut packet = Vec::new();
+    write_varint(data.len() as i32, &mut packet);
+    packet.extend_from_slice(&data);
+
+    // Send to client
+    socket.write_all(&packet).await?;
+    socket.shutdown().await?;
     Ok(())
 }

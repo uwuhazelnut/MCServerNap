@@ -6,10 +6,14 @@
 
 `mcservernap` monitors incoming Minecraft client connections and automatically launches (and later stops) a local Minecraft server process via RCON. It enables you to avoid running your server 24/7 by:
 
-* Listening for the first legitimate Minecraft **LoginStart** handshake (ignoring status pings).
+* Listening for the first legitimate Minecraft **LoginStart** handshake.
 * Spinning up the server process on-demand when a player attempts to join.
 * Watching the server via RCON for player activity.
 * Stopping the server after an idle timeout.
+
+<img width="657" height="94" alt="screenshot of server browser view" src="https://github.com/user-attachments/assets/dae15e22-849e-4469-bae9-df17cc94636b" />
+<img width="966" height="261" alt="screenshot of connect message" src="https://github.com/user-attachments/assets/ca128f11-5e7a-4666-a03c-6d56235385db" />
+
 
 There is also a `stop` subcommand to immediately send a `/stop` command via RCON.
 
@@ -75,6 +79,7 @@ mcservernap listen 0.0.0.0 25565 java -Xmx5G -Xms5G -jar server.jar nogui --rcon
 ```bash
 mcservernap listen 0.0.0.0 25565 "C:\path\to\your\script\start_server.bat" --rcon-port 25575 --rcon-pass rconpasswordmeow
 ```
+**IMPORTANT: When using a script, make sure the script closes its window at the end of the script (Windows .bat example: `exit`), or else this application won't detect that the Minecraft server process has shut down!**
 
 Once a client sends a LoginStart packet, the tool:
 
