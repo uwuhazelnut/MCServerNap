@@ -115,7 +115,6 @@ This immediately connects via RCON and sends the `/stop` command.
 
 Contributions are welcome! Feel free to open issues or pull requests to:
 
-* Add configuration options (e.g. custom timeouts)
 * Support TLS or SSH tunnels for RCON
 * Confirm Linux compatibility
 

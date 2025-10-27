@@ -32,18 +32,19 @@ impl Default for Config {
     }
 }
 
-fn get_config() -> Config {
+pub fn get_config() -> Config {
     let config_dir = "config";
     let config_path = "config/cfg.toml";
     // Create config directory if it doesn't exist
     if !Path::new(config_dir).exists() {
+        log::info!("No configuration directory found. Creating configuration directory.");
         fs::create_dir(config_dir).expect("Cannot create config directory");
     }
 
     match fs::read_to_string(config_path) {
         Ok(contents) => return toml::from_str(&contents).unwrap_or_else(|_| Config::default()),
         Err(_) => {
-            // File missing; write default
+            log::info!("No configuration file found. Creating default configuration file at {}.", config_path);
             let default_config = Config::default();
             let toml_str = toml::to_string_pretty(&default_config).unwrap();
             let mut file = File::create(config_path).expect("Cannot create config file");
