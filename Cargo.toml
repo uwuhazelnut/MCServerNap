@@ -11,3 +11,5 @@ env_logger = "0.9"
 anyhow = "1.0"
 rcon = { version = "0.6.0", features = ["rt-tokio"] }
 regex = "1"
+serde = { version = "1.0.228", features = ["derive"] }
+toml = "0.9.8"

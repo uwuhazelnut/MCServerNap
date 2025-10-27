@@ -1,3 +1,5 @@
+mod config;
+
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use std::net::SocketAddr;
