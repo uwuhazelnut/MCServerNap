@@ -4,6 +4,7 @@ use crate::config::Config;
 use anyhow::Result;
 use rcon::Connection;
 use regex::Regex;
+use serde_json::json;
 use std::io::ErrorKind;
 use std::net::SocketAddr;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -220,14 +221,12 @@ pub async fn send_stop_command(rcon_addr: &str, rcon_pass: &str) -> Result<()> {
 }
 
 pub async fn send_starting_message(mut socket: TcpStream, config: &Config) -> Result<()> {
-    let json_msg = format!(
-        r#"{{
-    "text":"{}",
-    "color":"{}",
-    "bold":{}
-    }}"#,
-        config.connection_msg_text, config.connection_msg_color, config.connection_msg_bold
-    );
+    let json_msg = json!({
+        "text": config.connection_msg_text,
+        "color": config.connection_msg_color,
+        "bold": config.connection_msg_bold
+    })
+    .to_string();
     let mut packet_data = Vec::new();
 
     //Packet ID 0x00 (login disconnect)
@@ -257,14 +256,23 @@ async fn handle_status_ping(socket: &mut TcpStream, config: &Config) -> Result<(
     // Create custom MOTD JSON
     // Protocol is "an integer used to check for incompatibilities between the player's client and the server
     // they are trying to connect to.". 766 = Minecraft 1.20.5 (https://minecraft.fandom.com/wiki/Protocol_version)
-    let motd_json = format!(
-        r#"{{
-        "version":{{"name":"MCServerNap (1.20.5)","protocol":766}},
-        "players":{{"max":0,"online":0,"sample":[]}},
-        "description":{{"text":"{}","color":"{}","bold":{}}}
-    }}"#,
-        config.motd_text, config.motd_color, config.motd_bold
-    );
+    let motd_json = json!({
+        "version": {
+            "name": "MCServerNap (1.20.5)",
+            "protocol": 766
+        },
+        "players": {
+            "max": 0,
+            "online": 0,
+            "sample": []
+        },
+        "description": {
+            "text": config.motd_text,
+            "color": config.motd_color,
+            "bold": config.motd_bold
+        }
+    })
+    .to_string();
 
     // Create status response packet
     let mut data = Vec::new();
