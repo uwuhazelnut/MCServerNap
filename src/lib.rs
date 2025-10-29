@@ -4,7 +4,7 @@ use crate::config::Config;
 use anyhow::Result;
 use rcon::Connection;
 use regex::Regex;
-use serde_json::json;
+use serde_json::{json, Value};
 use std::io::ErrorKind;
 use std::net::SocketAddr;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -256,7 +256,7 @@ async fn handle_status_ping(socket: &mut TcpStream, config: &Config) -> Result<(
     // Create custom MOTD JSON
     // Protocol is "an integer used to check for incompatibilities between the player's client and the server
     // they are trying to connect to.". 766 = Minecraft 1.20.5 (https://minecraft.fandom.com/wiki/Protocol_version)
-    let motd_json = json!({
+    let mut motd_json_obj = json!({
         "version": {
             "name": "MCServerNap (1.20.5)",
             "protocol": 766
@@ -271,8 +271,18 @@ async fn handle_status_ping(socket: &mut TcpStream, config: &Config) -> Result<(
             "color": config.motd_color,
             "bold": config.motd_bold
         }
-    })
-    .to_string();
+    });
+
+    if let Some(server_icon_base64) = config.server_icon.as_ref() {
+        if let Value::Object(ref mut map) = motd_json_obj {
+            map.insert(
+                "favicon".to_string(),
+                Value::String(format!("data:image/png;base64,{}", server_icon_base64)),
+            );
+        }
+    }
+
+    let motd_json = motd_json_obj.to_string();
 
     // Create status response packet
     let mut data = Vec::new();
