@@ -84,8 +84,8 @@ mcservernap listen 0.0.0.0 25565 "C:\path\to\your\script\start_server.bat" --rco
 Once a client sends a LoginStart packet, the tool:
 
 1. Drops the listener and launches your server command.
-2. Starts an **idle watchdog** task that polls RCON every 60 seconds.
-3. If no players remain for 10 minutes, sends `/stop` and exits.
+2. Starts an **idle watchdog** task that polls RCON according to `rcon_poll_interval`.
+3. If no players remain for the defined amount of `rcon_idle_timeout` time, sends `/stop` and exits.
 
 ### `stop` Options
 
@@ -104,18 +104,26 @@ This immediately connects via RCON and sends the `/stop` command.
 
 ## Configuration & Environment
 
-* **Logging**: Controlled via `RUST_LOG`. For example:
+### **Logging**: Controlled via entry point of `main()`:
 
-  ```bash
-  RUST_LOG=info mcservernap listen ...
-  ```
-* **Timeouts & Intervals**: Currently hard-coded in `main.rs` as 60s poll interval and 600s idle timeout. To customize, modify and rebuild the source.
+```rust
+env_logger::Builder::from_default_env()
+        .filter_level(log::LevelFilter::Info) // Change this LevelFilter to change logging level (e.g. Debug)
+        .init();
+```
+You need to rebuild the project for the change to take effect.
+
+### The **configuration** will be generated on first time usage of this application under `config/cfg.toml`
+Configuration Options:
+* **Timeouts & Intervals**: set via `rcon_idle_timeout` and `rcon_poll_interval` in <ins>seconds</ins>
+* **Message of the day (MOTD)**: The message shown to the user in the server browser menu. set via `motd_text`, `motd_color` and `motd_bold`
+* **Connection Message**: The message shown to the user when they try to connect. Set via `connection_msg_text`, `connection_msg_color` and `connection_msg_bold`
+* **Server Icon**: The icon of the server within the server browser menu. Set by inserting a `.png` file in the `config/` folder with the name `server-icon.png`. The image must be 64x64 pixels big. If it's not, this application will automatically resize the image to meet this requirement
 
 ## Contributing
 
 Contributions are welcome! Feel free to open issues or pull requests to:
 
-* Add configuration options (e.g. custom timeouts)
 * Support TLS or SSH tunnels for RCON
 * Confirm Linux compatibility
 

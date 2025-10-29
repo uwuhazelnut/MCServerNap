@@ -1,6 +1,10 @@
+pub mod config;
+
+use crate::config::Config;
 use anyhow::Result;
 use rcon::Connection;
 use regex::Regex;
+use serde_json::{json, Value};
 use std::io::ErrorKind;
 use std::net::SocketAddr;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -39,7 +43,11 @@ pub fn write_varint(mut val: i32, buf: &mut Vec<u8>) {
 }
 
 // Verifies a full Minecraft handshake on a single TcpStream.
-pub async fn verify_handshake_packet(socket: &mut TcpStream, peer: SocketAddr) -> Result<bool> {
+pub async fn verify_handshake_packet(
+    socket: &mut TcpStream,
+    peer: SocketAddr,
+    config: &Config,
+) -> Result<bool> {
     // 1) Read initial data, ignoring resets or immediate closes
     let mut buf = [0u8; 512];
     let n = match socket.read(&mut buf).await {
@@ -103,10 +111,12 @@ pub async fn verify_handshake_packet(socket: &mut TcpStream, peer: SocketAddr) -
         return Ok(false);
     }
     if let Some((next_state, _)) = read_varint(&buf[offset..n]) {
-        if next_state == 1 { // Status ping
-            handle_status_ping(socket).await?;
+        if next_state == 1 {
+            // Status ping
+            handle_status_ping(socket, &config).await?;
             return Ok(false);
-        } else if next_state == 2 { // Login handshake
+        } else if next_state == 2 {
+            // Login handshake
             log::info!("Login handshake detected from {}", peer);
             return Ok(true);
         } else {
@@ -210,12 +220,13 @@ pub async fn send_stop_command(rcon_addr: &str, rcon_pass: &str) -> Result<()> {
     Ok(())
 }
 
-pub async fn send_starting_message(mut socket: TcpStream) -> Result<()> {
-    let json_msg = r#"{
-    "text":"Server is now starting up. Please wait and try again shortly...",
-    "color":"light_purple",
-    "bold":true
-    }"#;
+pub async fn send_starting_message(mut socket: TcpStream, config: &Config) -> Result<()> {
+    let json_msg = json!({
+        "text": config.connection_msg_text,
+        "color": config.connection_msg_color,
+        "bold": config.connection_msg_bold
+    })
+    .to_string();
     let mut packet_data = Vec::new();
 
     //Packet ID 0x00 (login disconnect)
@@ -237,7 +248,7 @@ pub async fn send_starting_message(mut socket: TcpStream) -> Result<()> {
     Ok(())
 }
 
-async fn handle_status_ping(socket: &mut TcpStream) -> Result<()> {
+async fn handle_status_ping(socket: &mut TcpStream, config: &Config) -> Result<()> {
     // Read and discard the next packet (packet ID 0, status request)
     let mut buf = [0u8; 512];
     let _n = socket.read(&mut buf).await?;
@@ -245,11 +256,33 @@ async fn handle_status_ping(socket: &mut TcpStream) -> Result<()> {
     // Create custom MOTD JSON
     // Protocol is "an integer used to check for incompatibilities between the player's client and the server
     // they are trying to connect to.". 766 = Minecraft 1.20.5 (https://minecraft.fandom.com/wiki/Protocol_version)
-    let motd_json = r#"{
-        "version":{"name":"MCServerNap (1.20.5)","protocol":766},
-        "players":{"max":0,"online":0,"sample":[]},
-        "description":{"text":"Napping... Join to start server","color":"aqua","bold":true}
-    }"#;
+    let mut motd_json_obj = json!({
+        "version": {
+            "name": "MCServerNap (1.20.5)",
+            "protocol": 766
+        },
+        "players": {
+            "max": 0,
+            "online": 0,
+            "sample": []
+        },
+        "description": {
+            "text": config.motd_text,
+            "color": config.motd_color,
+            "bold": config.motd_bold
+        }
+    });
+
+    if let Some(server_icon_base64) = config.server_icon.as_ref() {
+        if let Value::Object(ref mut map) = motd_json_obj {
+            map.insert(
+                "favicon".to_string(),
+                Value::String(format!("data:image/png;base64,{}", server_icon_base64)),
+            );
+        }
+    }
+
+    let motd_json = motd_json_obj.to_string();
 
     // Create status response packet
     let mut data = Vec::new();

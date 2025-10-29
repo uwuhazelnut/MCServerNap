@@ -8,6 +8,7 @@ use tokio::net::TcpListener;
 use tokio::time::Duration;
 
 // Import core functions from the library crate
+use mcservernap::config;
 use mcservernap::{idle_watchdog_rcon, launch_server, send_stop_command, verify_handshake_packet};
 
 /// "Serverless" Minecraft Server Watcher
@@ -53,7 +54,7 @@ enum Commands {
 async fn main() -> Result<()> {
     // Initialise logger
     env_logger::Builder::from_default_env()
-        .filter_level(log::LevelFilter::Info)
+        .filter_level(log::LevelFilter::Info) // !!! CHANGE THIS BACK TO INFO BEFORE RELEASE !!!
         .init();
 
     let cli = Cli::parse();
@@ -72,6 +73,7 @@ async fn main() -> Result<()> {
             let rcon_addr = format!("127.0.0.1:{}", rcon_port);
             let rcon_pass_clone = rcon_pass.clone();
             let server_running = Arc::new(AtomicBool::new(false));
+            let app_config: config::Config = config::get_config();
 
             loop {
                 // Bind listener every loop iteration because we drop listener inside the loop
@@ -81,12 +83,14 @@ async fn main() -> Result<()> {
                 let (mut socket, peer) = listener.accept().await?;
                 log::info!("Incoming TCP connection from {}", peer);
 
-                match verify_handshake_packet(&mut socket, peer).await {
+                match verify_handshake_packet(&mut socket, peer, &app_config).await {
                     Ok(true) => {
                         if !server_running.load(Ordering::SeqCst) {
                             // Server is offline: notify player client
                             log::info!("Notifying {} (server offline)", peer);
-                            if let Err(e) = mcservernap::send_starting_message(socket).await {
+                            if let Err(e) =
+                                mcservernap::send_starting_message(socket, &app_config).await
+                            {
                                 log::warn!("Failed to notify {}: {}", peer, e);
                             }
                             // Launch server now
@@ -100,8 +104,8 @@ async fn main() -> Result<()> {
                                 if let Err(e) = idle_watchdog_rcon(
                                     &rcon_addr_clone,
                                     &rcon_pass_inner,
-                                    Duration::from_secs(60), // 1 minute check interval
-                                    Duration::from_secs(600), // 10 minutes idle timeout
+                                    Duration::from_secs(app_config.rcon_poll_interval), // check interval
+                                    Duration::from_secs(app_config.rcon_idle_timeout), // idle timeout
                                 )
                                 .await
                                 {
