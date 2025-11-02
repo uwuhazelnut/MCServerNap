@@ -150,6 +150,9 @@ async fn main() -> Result<()> {
                         Err(_) => continue,    // Wait for next connection
                     }
                 } else {
+                    // Server is running: proxy connection to actual Minecraft server
+                    log::info!("Proxying connection for {}", peer);
+
                     let mut server_socket = TcpStream::connect("127.0.0.1:25566").await?;
                     tokio::spawn(async move {
                         match tokio::io::copy_bidirectional(&mut client_socket, &mut server_socket)
