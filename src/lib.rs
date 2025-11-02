@@ -4,11 +4,12 @@ use crate::config::Config;
 use anyhow::Result;
 use rcon::Connection;
 use regex::Regex;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::io::ErrorKind;
 use std::net::SocketAddr;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
+use tokio::sync::watch;
 use tokio::time::{Duration, Instant, interval};
 
 /// Read a VarInt (Minecraft format) from the buffer, returning (value, bytes_read). Returns None if malformed
@@ -50,7 +51,9 @@ pub async fn verify_handshake_packet(
 ) -> Result<bool> {
     // 1) Read initial data, ignoring resets or immediate closes
     let mut buf = [0u8; 512];
-    let n = match socket.read(&mut buf).await {
+
+    // Only peek (instead of `read()`; prevents consumption) at the socket so we can copy the data later
+    let n = match socket.peek(&mut buf).await {
         Ok(0) => {
             log::debug!("Connection closed immediately by {}", peer);
             return Ok(false);
@@ -129,10 +132,10 @@ pub async fn verify_handshake_packet(
 
 /// Launches the Minecraft server process with given command.
 /// On Windows, opens the batch/script in a new terminal window so logs stay visible
-pub fn launch_server(command: &str, args: &[&str]) -> Result<std::process::Child> {
+pub fn launch_server(command: &str, args: &[&str]) -> Result<tokio::process::Child> {
     #[cfg(target_os = "windows")]
     {
-        let mut cmd = std::process::Command::new("cmd");
+        let mut cmd = tokio::process::Command::new("cmd");
         cmd.args(&["/C", "start", "", "/WAIT", command]);
         for &arg in args {
             cmd.arg(arg);
@@ -143,7 +146,7 @@ pub fn launch_server(command: &str, args: &[&str]) -> Result<std::process::Child
     }
     #[cfg(not(target_os = "windows"))]
     {
-        let child = std::process::Command::new(command).args(args).spawn()?;
+        let child = tokio::process::Command::new(command).args(args).spawn()?;
         log::info!("Launched server: {} {:?}", command, args);
         Ok(child)
     }
@@ -156,6 +159,7 @@ pub async fn idle_watchdog_rcon(
     rcon_pass: &str,
     poll_interval: Duration,
     timeout: Duration,
+    rcon_connected_notification: watch::Sender<bool>,
 ) -> Result<()> {
     log::info!(
         "Starting RCON idle watchdog: polling {} every {:?}",
@@ -180,6 +184,9 @@ pub async fn idle_watchdog_rcon(
 
     let mut conn = conn;
     log::info!("Successfully connected to RCON at {}", rcon_addr);
+
+    // Notify function caller that connection to RCON has been established
+    rcon_connected_notification.send(true).ok();
 
     // Polling loop
     let player_count_re = Regex::new(r"There are (\d+) of a max").unwrap();
