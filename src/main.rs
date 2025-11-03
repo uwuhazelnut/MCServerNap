@@ -81,8 +81,6 @@ async fn main() -> Result<()> {
 
             log::info!("Listening for login on {}", addr);
             loop {
-                // Bind listener every loop iteration because we drop listener inside the loop
-
                 let (mut client_socket, peer) = listener.accept().await?;
                 log::info!("Incoming TCP connection from {}", peer);
 
@@ -99,15 +97,6 @@ async fn main() -> Result<()> {
                             {
                                 log::warn!("Failed to notify {}: {}", peer, e);
                             }
-
-                            let server_running_clone = server_running.clone();
-                            tokio::spawn(async move {
-                                while !*rx.borrow() {
-                                    rx.changed().await.unwrap();
-                                }
-
-                                server_running_clone.store(true, Ordering::SeqCst);
-                            });
 
                             // Launch server now
                             let dereferenced_tx = (*tx_clone).clone();
@@ -144,6 +133,15 @@ async fn main() -> Result<()> {
                                         "Server stopped. Restarting listener for next connection..."
                                     );
                                 });
+
+                                let server_running_clone = server_running.clone();
+                                tokio::spawn(async move {
+                                    while !*rx.borrow() {
+                                        rx.changed().await.unwrap();
+                                    }
+
+                                    server_running_clone.store(true, Ordering::SeqCst);
+                                });
                             }
                         }
                         Ok(false) => continue, // Not a login handshake, ignore
@@ -152,6 +150,7 @@ async fn main() -> Result<()> {
                 } else {
                     // Server is running: proxy connection to actual Minecraft server
                     log::info!("Proxying connection for {}", peer);
+                    server_starting.store(false, Ordering::SeqCst);
 
                     let mut server_socket = TcpStream::connect("127.0.0.1:25566").await?;
                     tokio::spawn(async move {

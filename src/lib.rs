@@ -195,7 +195,14 @@ pub async fn idle_watchdog_rcon(
 
     loop {
         ticker.tick().await;
-        let response = conn.cmd("list").await?;
+        let response = match conn.cmd("list").await {
+            Ok(r) => r,
+            Err(e) => {
+                log::warn!("RCON connection error: {}. Stopping RCON watchdog.", e);
+                rcon_connected_notification.send(false).ok();
+                break;
+            }
+        };
         log::info!("RCON list response: {}", response);
 
         let count = player_count_re
@@ -208,6 +215,7 @@ pub async fn idle_watchdog_rcon(
             last_online = Instant::now();
         } else if last_online.elapsed() >= timeout {
             log::info!("No players for {:?}, stopping server...", timeout);
+            rcon_connected_notification.send(false).ok();
             let _ = conn.cmd("stop").await;
             break;
         }
