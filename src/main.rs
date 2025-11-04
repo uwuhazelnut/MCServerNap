@@ -33,6 +33,9 @@ enum Commands {
         /// Arguments for the command (pass all Java/batch args here)
         #[arg(num_args(0..))]
         args: Vec<String>,
+        /// Minecraft server port (use --server-port)
+        #[arg(long)]
+        server_port: u16,
         /// RCON port (use --rcon-port)
         #[arg(long)]
         rcon_port: u16,
@@ -66,6 +69,7 @@ async fn main() -> Result<()> {
             port,
             cmd,
             args,
+            server_port,
             rcon_port,
             rcon_pass,
         } => {
@@ -181,7 +185,8 @@ async fn main() -> Result<()> {
                             // Server is running: proxy connection to actual Minecraft server
                             log::info!("Proxying connection for {}", peer);
                             tokio::spawn(async move {
-                                match TcpStream::connect("127.0.0.1:25566").await {
+                                let server_addr = format!("127.0.0.1:{}", server_port);
+                                match TcpStream::connect(server_addr).await {
                                     Ok(mut server_socket) => {
                                         match tokio::io::copy_bidirectional(
                                             &mut client_socket,
