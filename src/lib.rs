@@ -7,10 +7,19 @@ use regex::Regex;
 use serde_json::{Value, json};
 use std::io::ErrorKind;
 use std::net::SocketAddr;
+use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
-use tokio::sync::watch;
+use tokio::sync::Mutex;
 use tokio::time::{Duration, Instant, interval};
+
+/// Basic enum to provide state machine system for server status
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ServerState {
+    Stopped,
+    Starting,
+    Running,
+}
 
 /// Read a VarInt (Minecraft format) from the buffer, returning (value, bytes_read). Returns None if malformed
 fn read_varint(buf: &[u8]) -> Option<(i32, usize)> {
@@ -159,7 +168,7 @@ pub async fn idle_watchdog_rcon(
     rcon_pass: &str,
     poll_interval: Duration,
     timeout: Duration,
-    rcon_connected_notification: watch::Sender<bool>,
+    server_state: Arc<Mutex<ServerState>>,
 ) -> Result<()> {
     log::info!(
         "Starting RCON idle watchdog: polling {} every {:?}",
@@ -172,11 +181,15 @@ pub async fn idle_watchdog_rcon(
     let conn = loop {
         match Connection::<TcpStream>::connect(rcon_addr, rcon_pass).await {
             Ok(c) => break c,
-            Err(err) if start.elapsed() <= Duration::from_secs(120) => {
+            Err(err) if start.elapsed() <= Duration::from_secs(600) => {
                 log::warn!("RCON connection failed ({}), retrying...", err);
                 tokio::time::sleep(Duration::from_secs(1)).await;
             }
             Err(err) => {
+                {
+                    let mut state = server_state.lock().await;
+                    *state = ServerState::Stopped;
+                }
                 return Err(err.into());
             }
         }
@@ -184,9 +197,11 @@ pub async fn idle_watchdog_rcon(
 
     let mut conn = conn;
     log::info!("Successfully connected to RCON at {}", rcon_addr);
-
-    // Notify function caller that connection to RCON has been established
-    rcon_connected_notification.send(true).ok();
+    {
+        let mut state = server_state.lock().await;
+        log::debug!("Server state set to Running");
+        *state = ServerState::Running;
+    }
 
     // Polling loop
     let player_count_re = Regex::new(r"There are (\d+) of a max").unwrap();
@@ -199,7 +214,10 @@ pub async fn idle_watchdog_rcon(
             Ok(r) => r,
             Err(e) => {
                 log::warn!("RCON connection error: {}. Stopping RCON watchdog.", e);
-                rcon_connected_notification.send(false).ok();
+                {
+                    let mut state = server_state.lock().await;
+                    *state = ServerState::Stopped;
+                }
                 break;
             }
         };
@@ -215,8 +233,11 @@ pub async fn idle_watchdog_rcon(
             last_online = Instant::now();
         } else if last_online.elapsed() >= timeout {
             log::info!("No players for {:?}, stopping server...", timeout);
-            rcon_connected_notification.send(false).ok();
             let _ = conn.cmd("stop").await;
+            {
+                let mut state = server_state.lock().await;
+                *state = ServerState::Stopped;
+            }
             break;
         }
     }
