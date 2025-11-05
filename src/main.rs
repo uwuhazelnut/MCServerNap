@@ -89,11 +89,12 @@ async fn main() -> Result<()> {
                 let server_state_clone = server_state.clone();
 
                 let client_handled = {
-                    // Scoped to hold the lock only while checking and possibly updating state
+                    // Scoped to hold the Mutex lock only while checking and possibly updating state
                     let mut state_guard = server_state_clone.lock().await;
 
                     match *state_guard {
                         ServerState::Stopped => {
+                            // Start the server and RCON watchdog
                             match verify_handshake_packet(&mut client_socket, peer, &app_config)
                                 .await
                             {
@@ -109,7 +110,7 @@ async fn main() -> Result<()> {
 
                                     // Transition to starting state
                                     *state_guard = ServerState::Starting;
-                                    log::debug!("Server state set to Starting");
+                                    log::debug!("Server state set to Starting in main()");
 
                                     let mut child = launch_server(&cmd, &arg_slices)?;
 
@@ -121,8 +122,8 @@ async fn main() -> Result<()> {
                                             &rcon_addr_clone,
                                             &rcon_pass_inner,
                                             Duration::from_secs(app_config.rcon_poll_interval), // check interval
-                                            Duration::from_secs(app_config.rcon_idle_timeout),
-                                            server_state_for_rcon_watchdog, // idle timeout
+                                            Duration::from_secs(app_config.rcon_idle_timeout), // idle timeout
+                                            server_state_for_rcon_watchdog,
                                         )
                                         .await
                                         {
@@ -134,7 +135,7 @@ async fn main() -> Result<()> {
                                     tokio::spawn(async move {
                                         // Wait for server exit
                                         match child.wait().await {
-                                            Ok(_) => log::info!("Server exited"),
+                                            Ok(_) => (),
                                             Err(e) => log::error!(
                                                 "Failed to wait for server exit: {:?}",
                                                 e
@@ -144,7 +145,7 @@ async fn main() -> Result<()> {
                                         let mut state = server_state_for_server_exit.lock().await;
                                         *state = ServerState::Stopped;
                                         log::debug!(
-                                            "Server state set to Stopped after server exit"
+                                            "Server state set to Stopped after server exit in main()"
                                         );
                                         log::info!(
                                             "Server stopped. Restarting listener for next connection..."
@@ -158,6 +159,7 @@ async fn main() -> Result<()> {
                             }
                         }
                         ServerState::Starting => {
+                            // Keep notifying the player client that the server is starting
                             match verify_handshake_packet(&mut client_socket, peer, &app_config)
                                 .await
                             {

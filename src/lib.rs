@@ -187,8 +187,10 @@ pub async fn idle_watchdog_rcon(
             }
             Err(err) => {
                 {
+                    // Exclusively scoping all Mutex locks, even if it's not strictly necessary
                     let mut state = server_state.lock().await;
                     *state = ServerState::Stopped;
+                    log::debug!("Server state set to Stopped in idle_watchdog_rcon()");
                 }
                 return Err(err.into());
             }
@@ -199,8 +201,8 @@ pub async fn idle_watchdog_rcon(
     log::info!("Successfully connected to RCON at {}", rcon_addr);
     {
         let mut state = server_state.lock().await;
-        log::debug!("Server state set to Running");
         *state = ServerState::Running;
+        log::debug!("Server state set to Running in idle_watchdog_rcon()");
     }
 
     // Polling loop
@@ -217,6 +219,7 @@ pub async fn idle_watchdog_rcon(
                 {
                     let mut state = server_state.lock().await;
                     *state = ServerState::Stopped;
+                    log::debug!("Server state set to Stopped in idle_watchdog_rcon()");
                 }
                 break;
             }
@@ -237,6 +240,7 @@ pub async fn idle_watchdog_rcon(
             {
                 let mut state = server_state.lock().await;
                 *state = ServerState::Stopped;
+                log::debug!("Server state set to Stopped in idle_watchdog_rcon()");
             }
             break;
         }
