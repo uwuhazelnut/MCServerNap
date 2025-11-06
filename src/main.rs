@@ -2,10 +2,10 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 use std::net::SocketAddr;
 use std::sync::Arc;
+use tokio::io::AsyncWriteExt;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Mutex;
 use tokio::time::Duration;
-use tokio::io::AsyncWriteExt;
 
 // Import core functions from the library crate
 use mcservernap::config;
@@ -118,7 +118,7 @@ async fn main() -> Result<()> {
                                     let rcon_addr_clone = rcon_addr.clone();
                                     let rcon_pass_clone = rcon_pass.clone();
                                     let server_state_for_rcon_watchdog = server_state.clone();
-                                    tokio::spawn(async move {
+                                    let rcon_watchdog_handle = tokio::spawn(async move {
                                         if let Err(e) = idle_watchdog_rcon(
                                             &rcon_addr_clone,
                                             &rcon_pass_clone,
@@ -142,6 +142,11 @@ async fn main() -> Result<()> {
                                                 e
                                             ),
                                         }
+
+                                        rcon_watchdog_handle.abort();
+                                        log::info!(
+                                            "RCON watchdog aborted due to manual server exit."
+                                        );
 
                                         let mut state = server_state_for_server_exit.lock().await;
                                         *state = ServerState::Stopped;
