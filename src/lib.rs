@@ -11,7 +11,7 @@ use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::sync::Mutex;
-use tokio::time::{Duration, Instant, interval};
+use tokio::time::{Duration, Instant, interval, timeout};
 
 /// Basic enum to provide state machine system for server status
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -61,20 +61,23 @@ pub async fn verify_handshake_packet(
     // 1) Read initial data, ignoring resets or immediate closes
     let mut buf = [0u8; 512];
 
-    // Only peek (instead of `read()`; prevents consumption) at the socket so we can copy the data later
-    let n = match socket.peek(&mut buf).await {
-        Ok(0) => {
+    let n = match timeout(Duration::from_secs(5), socket.read(&mut buf)).await {
+        Ok(Ok(0)) => {
             log::debug!("Connection closed immediately by {}", peer);
             return Ok(false);
         }
-        Ok(n) => n,
-        Err(e) if e.kind() == ErrorKind::ConnectionReset => {
+        Ok(Ok(n)) => n,
+        Ok(Err(e)) if e.kind() == ErrorKind::ConnectionReset => {
             log::debug!("Connection reset by peer {} (ignoring)", peer);
             return Ok(false);
         }
-        Err(e) => {
+        Ok(Err(e)) => {
             // Unexpected I/O error, propagate
             return Err(e.into());
+        }
+        Err(_) => {
+            log::debug!("Timeout waiting for data from {}", peer);
+            return Ok(false);
         }
     };
 
@@ -209,20 +212,35 @@ pub async fn idle_watchdog_rcon(
     let player_count_re = Regex::new(r"There are (\d+) of a max").unwrap();
     let mut ticker = interval(poll_interval);
     let mut last_online = Instant::now();
+    let mut consecutive_errors = 0;
 
     loop {
         ticker.tick().await;
-        let response = match conn.cmd("list").await {
-            Ok(r) => r,
-            Err(e) => {
-                log::warn!("RCON connection error: {}. Stopping RCON watchdog.", e);
-                {
-                    let mut state = server_state.lock().await;
-                    *state = ServerState::Stopped;
-                    log::debug!("Server state set to Stopped in idle_watchdog_rcon()");
+        let response = loop {
+            match conn.cmd("list").await {
+                Ok(r) => {
+                    consecutive_errors = 0;
+                    break r;
                 }
-                break;
-            }
+                Err(e) if consecutive_errors < 5 => {
+                    consecutive_errors += 1;
+                    log::warn!(
+                        "RCON `list` poll failed: {} \nRetrying... ({}/5)",
+                        e,
+                        consecutive_errors
+                    );
+                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                }
+                Err(e) => {
+                    log::error!("RCON connection error: {}. Stopping RCON watchdog.", e);
+                    {
+                        let mut state = server_state.lock().await;
+                        *state = ServerState::Stopped;
+                        log::debug!("Server state set to Stopped in idle_watchdog_rcon()");
+                    }
+                    return Err(e.into());
+                }
+            };
         };
         log::info!("RCON list response: {}", response);
 

@@ -5,6 +5,7 @@ use std::sync::Arc;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Mutex;
 use tokio::time::Duration;
+use tokio::io::AsyncWriteExt;
 
 // Import core functions from the library crate
 use mcservernap::config;
@@ -75,8 +76,8 @@ async fn main() -> Result<()> {
         } => {
             let addr: SocketAddr = format!("{}:{}", host, port).parse()?;
             let arg_slices: Vec<&str> = args.iter().map(String::as_str).collect();
-            let rcon_addr = format!("127.0.0.1:{}", rcon_port);
-            let rcon_pass_clone = rcon_pass.clone();
+            let rcon_addr = Arc::new(format!("127.0.0.1:{}", rcon_port));
+            let rcon_pass = Arc::new(rcon_pass);
 
             let server_state = Arc::new(Mutex::new(ServerState::Stopped));
             let app_config: config::Config = config::get_config();
@@ -85,12 +86,12 @@ async fn main() -> Result<()> {
             log::info!("Listening for login on {}", addr);
             loop {
                 let (mut client_socket, peer) = listener.accept().await?;
+                client_socket.set_nodelay(true)?;
                 log::info!("Incoming TCP connection from {}", peer);
-                let server_state_clone = server_state.clone();
 
                 let client_handled = {
                     // Scoped to hold the Mutex lock only while checking and possibly updating state
-                    let mut state_guard = server_state_clone.lock().await;
+                    let mut state_guard = server_state.lock().await;
 
                     match *state_guard {
                         ServerState::Stopped => {
@@ -115,12 +116,12 @@ async fn main() -> Result<()> {
                                     let mut child = launch_server(&cmd, &arg_slices)?;
 
                                     let rcon_addr_clone = rcon_addr.clone();
-                                    let rcon_pass_inner = rcon_pass_clone.clone();
-                                    let server_state_for_rcon_watchdog = server_state_clone.clone();
+                                    let rcon_pass_clone = rcon_pass.clone();
+                                    let server_state_for_rcon_watchdog = server_state.clone();
                                     tokio::spawn(async move {
                                         if let Err(e) = idle_watchdog_rcon(
                                             &rcon_addr_clone,
-                                            &rcon_pass_inner,
+                                            &rcon_pass_clone,
                                             Duration::from_secs(app_config.rcon_poll_interval), // check interval
                                             Duration::from_secs(app_config.rcon_idle_timeout), // idle timeout
                                             server_state_for_rcon_watchdog,
@@ -131,7 +132,7 @@ async fn main() -> Result<()> {
                                         }
                                     });
 
-                                    let server_state_for_server_exit = server_state_clone.clone();
+                                    let server_state_for_server_exit = server_state.clone();
                                     tokio::spawn(async move {
                                         // Wait for server exit
                                         match child.wait().await {
@@ -190,6 +191,7 @@ async fn main() -> Result<()> {
                                 let server_addr = format!("127.0.0.1:{}", server_port);
                                 match TcpStream::connect(server_addr).await {
                                     Ok(mut server_socket) => {
+                                        server_socket.set_nodelay(true).unwrap();
                                         match tokio::io::copy_bidirectional(
                                             &mut client_socket,
                                             &mut server_socket,
@@ -207,6 +209,22 @@ async fn main() -> Result<()> {
                                             Err(e) => {
                                                 log::error!("Proxy error for {}: {:?}", peer, e);
                                             }
+                                        }
+
+                                        // Attempt graceful shutdown of sockets
+                                        if let Err(e) = client_socket.shutdown().await {
+                                            log::warn!(
+                                                "Failed to shutdown client socket for {}: {:?}",
+                                                peer,
+                                                e
+                                            );
+                                        }
+                                        if let Err(e) = server_socket.shutdown().await {
+                                            log::warn!(
+                                                "Failed to shutdown server socket for {}: {:?}",
+                                                peer,
+                                                e
+                                            );
                                         }
                                     }
                                     Err(e) => {
