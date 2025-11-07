@@ -255,11 +255,6 @@ pub async fn idle_watchdog_rcon(
         } else if last_online.elapsed() >= timeout {
             log::info!("No players for {:?}, stopping server...", timeout);
             let _ = conn.cmd("stop").await;
-            {
-                let mut state = server_state.lock().await;
-                *state = ServerState::Stopped;
-                log::debug!("Server state set to Stopped in idle_watchdog_rcon()");
-            }
             break;
         }
     }

@@ -148,8 +148,11 @@ async fn main() -> Result<()> {
                                             "RCON watchdog aborted due to manual server exit."
                                         );
 
-                                        let mut state = server_state_for_server_exit.lock().await;
-                                        *state = ServerState::Stopped;
+                                        {
+                                            let mut state =
+                                                server_state_for_server_exit.lock().await;
+                                            *state = ServerState::Stopped;
+                                        }
                                         log::debug!(
                                             "Server state set to Stopped after server exit in main()"
                                         );
