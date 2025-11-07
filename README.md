@@ -21,7 +21,7 @@ There is also a `stop` subcommand to immediately send a `/stop` command via RCON
 
 * **On-demand startup**: server only runs when a player actually joins.
 * **Idle shutdown**: automatically stops server when no players remain for a set duration.
-* **Cross-platform**: spawns a new terminal window on Windows, runs directly on Linux systems (app not tested on Linux yet).
+* **Cross-platform**: spawns a new terminal window on Windows, runs directly on Linux systems.
 * **Extensible**: configure RCON settings, startup command and ports.
 
 ## Installation
@@ -129,7 +129,6 @@ Configuration Options:
 Contributions are welcome! Feel free to open issues or pull requests to:
 
 * Support TLS or SSH tunnels for RCON
-* Confirm Linux compatibility
 
 ## License
 
