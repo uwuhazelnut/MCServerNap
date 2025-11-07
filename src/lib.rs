@@ -4,12 +4,22 @@ use crate::config::Config;
 use anyhow::Result;
 use rcon::Connection;
 use regex::Regex;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::io::ErrorKind;
 use std::net::SocketAddr;
+use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
-use tokio::time::{Duration, Instant, interval};
+use tokio::sync::Mutex;
+use tokio::time::{Duration, Instant, interval, timeout};
+
+/// Basic enum to provide state machine system for server status
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ServerState {
+    Stopped,
+    Starting,
+    Running,
+}
 
 /// Read a VarInt (Minecraft format) from the buffer, returning (value, bytes_read). Returns None if malformed
 fn read_varint(buf: &[u8]) -> Option<(i32, usize)> {
@@ -50,19 +60,24 @@ pub async fn verify_handshake_packet(
 ) -> Result<bool> {
     // 1) Read initial data, ignoring resets or immediate closes
     let mut buf = [0u8; 512];
-    let n = match socket.read(&mut buf).await {
-        Ok(0) => {
+
+    let n = match timeout(Duration::from_secs(5), socket.read(&mut buf)).await {
+        Ok(Ok(0)) => {
             log::debug!("Connection closed immediately by {}", peer);
             return Ok(false);
         }
-        Ok(n) => n,
-        Err(e) if e.kind() == ErrorKind::ConnectionReset => {
+        Ok(Ok(n)) => n,
+        Ok(Err(e)) if e.kind() == ErrorKind::ConnectionReset => {
             log::debug!("Connection reset by peer {} (ignoring)", peer);
             return Ok(false);
         }
-        Err(e) => {
+        Ok(Err(e)) => {
             // Unexpected I/O error, propagate
             return Err(e.into());
+        }
+        Err(_) => {
+            log::debug!("Timeout waiting for data from {}", peer);
+            return Ok(false);
         }
     };
 
@@ -129,10 +144,10 @@ pub async fn verify_handshake_packet(
 
 /// Launches the Minecraft server process with given command.
 /// On Windows, opens the batch/script in a new terminal window so logs stay visible
-pub fn launch_server(command: &str, args: &[&str]) -> Result<std::process::Child> {
+pub fn launch_server(command: &str, args: &[&str]) -> Result<tokio::process::Child> {
     #[cfg(target_os = "windows")]
     {
-        let mut cmd = std::process::Command::new("cmd");
+        let mut cmd = tokio::process::Command::new("cmd");
         cmd.args(&["/C", "start", "", "/WAIT", command]);
         for &arg in args {
             cmd.arg(arg);
@@ -143,7 +158,7 @@ pub fn launch_server(command: &str, args: &[&str]) -> Result<std::process::Child
     }
     #[cfg(not(target_os = "windows"))]
     {
-        let child = std::process::Command::new(command).args(args).spawn()?;
+        let child = tokio::process::Command::new(command).args(args).spawn()?;
         log::info!("Launched server: {} {:?}", command, args);
         Ok(child)
     }
@@ -156,6 +171,7 @@ pub async fn idle_watchdog_rcon(
     rcon_pass: &str,
     poll_interval: Duration,
     timeout: Duration,
+    server_state: Arc<Mutex<ServerState>>,
 ) -> Result<()> {
     log::info!(
         "Starting RCON idle watchdog: polling {} every {:?}",
@@ -168,11 +184,17 @@ pub async fn idle_watchdog_rcon(
     let conn = loop {
         match Connection::<TcpStream>::connect(rcon_addr, rcon_pass).await {
             Ok(c) => break c,
-            Err(err) if start.elapsed() <= Duration::from_secs(120) => {
+            Err(err) if start.elapsed() <= Duration::from_secs(600) => {
                 log::warn!("RCON connection failed ({}), retrying...", err);
                 tokio::time::sleep(Duration::from_secs(1)).await;
             }
             Err(err) => {
+                {
+                    // Exclusively scoping all Mutex locks, even if it's not strictly necessary
+                    let mut state = server_state.lock().await;
+                    *state = ServerState::Stopped;
+                    log::debug!("Server state set to Stopped in idle_watchdog_rcon()");
+                }
                 return Err(err.into());
             }
         }
@@ -180,15 +202,46 @@ pub async fn idle_watchdog_rcon(
 
     let mut conn = conn;
     log::info!("Successfully connected to RCON at {}", rcon_addr);
+    {
+        let mut state = server_state.lock().await;
+        *state = ServerState::Running;
+        log::debug!("Server state set to Running in idle_watchdog_rcon()");
+    }
 
     // Polling loop
     let player_count_re = Regex::new(r"There are (\d+) of a max").unwrap();
     let mut ticker = interval(poll_interval);
     let mut last_online = Instant::now();
+    let mut consecutive_errors = 0;
 
     loop {
         ticker.tick().await;
-        let response = conn.cmd("list").await?;
+        let response = loop {
+            match conn.cmd("list").await {
+                Ok(r) => {
+                    consecutive_errors = 0;
+                    break r;
+                }
+                Err(e) if consecutive_errors < 5 => {
+                    consecutive_errors += 1;
+                    log::warn!(
+                        "RCON `list` poll failed: {} \nRetrying... ({}/5)",
+                        e,
+                        consecutive_errors
+                    );
+                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                }
+                Err(e) => {
+                    log::error!("RCON connection error: {}. Stopping RCON watchdog.", e);
+                    {
+                        let mut state = server_state.lock().await;
+                        *state = ServerState::Stopped;
+                        log::debug!("Server state set to Stopped in idle_watchdog_rcon()");
+                    }
+                    return Err(e.into());
+                }
+            };
+        };
         log::info!("RCON list response: {}", response);
 
         let count = player_count_re
@@ -202,6 +255,11 @@ pub async fn idle_watchdog_rcon(
         } else if last_online.elapsed() >= timeout {
             log::info!("No players for {:?}, stopping server...", timeout);
             let _ = conn.cmd("stop").await;
+            {
+                let mut state = server_state.lock().await;
+                *state = ServerState::Stopped;
+                log::debug!("Server state set to Stopped in idle_watchdog_rcon()");
+            }
             break;
         }
     }

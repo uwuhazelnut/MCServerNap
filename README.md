@@ -59,25 +59,29 @@ mcservernap <COMMAND> [OPTIONS]
 
 ### `listen` Options
 
-| Option        | Description                                      | Required |
-| ------------- | ------------------------------------------------ | -------- |
-| `host`        | Host or IP to bind (e.g. `0.0.0.0`)              | Yes      |
-| `port`        | Port to listen on for Minecraft clients          | Yes      |
-| `cmd`         | Command or script to launch the Minecraft server | Yes      |
-| `args...`     | Arguments passed to the server command           | No       |
-| `--rcon-port` | Port for the server’s RCON interface             | Yes      |
-| `--rcon-pass` | Password for RCON authentication                 | Yes      |
+| Option          | Description                                                            | Required |
+| --------------- | ---------------------------------------------------------------------- | -------- |
+| `host`          | Host or IP to bind (e.g. `0.0.0.0`)                                    | Yes      |
+| `port`          | Port to listen on for Minecraft clients                                | Yes      |
+| `cmd`           | Command or script to launch the Minecraft server                       | Yes      |
+| `args...`       | Arguments passed to the server command                                 | No       |
+| `--server-port` | Port of the actual Minecraft Server that users will get forwarded to   | Yes      |
+| `--rcon-port`   | Port for the server’s RCON interface                                   | Yes      |
+| `--rcon-pass`   | Password for RCON authentication                                       | Yes      |
+
+> [!NOTE]
+> The port of the Minecraft server does not require port forwarding, only the port of this application.
 
 #### Example
 
 ```bash
-mcservernap listen 0.0.0.0 25565 java -Xmx5G -Xms5G -jar server.jar nogui --rcon-port 25575 --rcon-pass rconpasswordmeow
+mcservernap listen 0.0.0.0 25565 java -Xmx5G -Xms5G -jar server.jar nogui --server-port 25566 --rcon-port 25575 --rcon-pass rconpasswordmeow
 ```
 
 #### Script Example
 
 ```bash
-mcservernap listen 0.0.0.0 25565 "C:\path\to\your\script\start_server.bat" --rcon-port 25575 --rcon-pass rconpasswordmeow
+mcservernap listen 0.0.0.0 25565 "C:\path\to\your\script\start_server.bat" --server-port 25566 --rcon-port 25575 --rcon-pass rconpasswordmeow
 ```
 **IMPORTANT: When using a script, make sure the script closes its window at the end of the script (Windows .bat example: `exit`), or else this application won't detect that the Minecraft server process has shut down!**
 

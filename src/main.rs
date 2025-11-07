@@ -2,14 +2,16 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::io::AsyncWriteExt;
-use tokio::net::TcpListener;
+use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::Mutex;
 use tokio::time::Duration;
 
 // Import core functions from the library crate
 use mcservernap::config;
-use mcservernap::{idle_watchdog_rcon, launch_server, send_stop_command, verify_handshake_packet};
+use mcservernap::{
+    ServerState, idle_watchdog_rcon, launch_server, send_stop_command, verify_handshake_packet,
+};
 
 /// "Serverless" Minecraft Server Watcher
 #[derive(Parser)]
@@ -32,6 +34,9 @@ enum Commands {
         /// Arguments for the command (pass all Java/batch args here)
         #[arg(num_args(0..))]
         args: Vec<String>,
+        /// Minecraft server port (use --server-port)
+        #[arg(long)]
+        server_port: u16,
         /// RCON port (use --rcon-port)
         #[arg(long)]
         rcon_port: u16,
@@ -54,7 +59,7 @@ enum Commands {
 async fn main() -> Result<()> {
     // Initialise logger
     env_logger::Builder::from_default_env()
-        .filter_level(log::LevelFilter::Info) // !!! CHANGE THIS BACK TO INFO BEFORE RELEASE !!!
+        .filter_level(log::LevelFilter::Debug) // !!! CHANGE THIS BACK TO INFO BEFORE RELEASE !!!
         .init();
 
     let cli = Cli::parse();
@@ -65,73 +70,188 @@ async fn main() -> Result<()> {
             port,
             cmd,
             args,
+            server_port,
             rcon_port,
             rcon_pass,
         } => {
             let addr: SocketAddr = format!("{}:{}", host, port).parse()?;
             let arg_slices: Vec<&str> = args.iter().map(String::as_str).collect();
-            let rcon_addr = format!("127.0.0.1:{}", rcon_port);
-            let rcon_pass_clone = rcon_pass.clone();
-            let server_running = Arc::new(AtomicBool::new(false));
+            let rcon_addr = Arc::new(format!("127.0.0.1:{}", rcon_port));
+            let rcon_pass = Arc::new(rcon_pass);
+
+            let server_state = Arc::new(Mutex::new(ServerState::Stopped));
             let app_config: config::Config = config::get_config();
+            let listener = TcpListener::bind(addr).await?;
 
+            log::info!("Listening for login on {}", addr);
             loop {
-                // Bind listener every loop iteration because we drop listener inside the loop
-                let listener = TcpListener::bind(addr).await?;
-                log::info!("Listening for login on {}", addr);
-
-                let (mut socket, peer) = listener.accept().await?;
+                let (mut client_socket, peer) = listener.accept().await?;
+                client_socket.set_nodelay(true)?;
                 log::info!("Incoming TCP connection from {}", peer);
 
-                match verify_handshake_packet(&mut socket, peer, &app_config).await {
-                    Ok(true) => {
-                        if !server_running.load(Ordering::SeqCst) {
-                            // Server is offline: notify player client
-                            log::info!("Notifying {} (server offline)", peer);
-                            if let Err(e) =
-                                mcservernap::send_starting_message(socket, &app_config).await
-                            {
-                                log::warn!("Failed to notify {}: {}", peer, e);
-                            }
-                            // Launch server now
-                            server_running.store(true, Ordering::SeqCst);
-                            drop(listener); // To-Do: DELAY LISTENER DROP UNTIL SERVER HAS STARTED OR ELSE THE USER GETS A CONNECTION ERROR IF THEY RECONNECT TOO EARLY
-                            let mut child = launch_server(&cmd, &arg_slices)?;
+                let client_handled = {
+                    // Scoped to hold the Mutex lock only while checking and possibly updating state
+                    let mut state_guard = server_state.lock().await;
 
-                            let rcon_addr_clone = rcon_addr.clone();
-                            let rcon_pass_inner = rcon_pass_clone.clone();
-                            tokio::spawn(async move {
-                                if let Err(e) = idle_watchdog_rcon(
-                                    &rcon_addr_clone,
-                                    &rcon_pass_inner,
-                                    Duration::from_secs(app_config.rcon_poll_interval), // check interval
-                                    Duration::from_secs(app_config.rcon_idle_timeout), // idle timeout
-                                )
+                    match *state_guard {
+                        ServerState::Stopped => {
+                            // Start the server and RCON watchdog
+                            match verify_handshake_packet(&mut client_socket, peer, &app_config)
                                 .await
-                                {
-                                    log::error!("Idle watchdog error: {}", e);
+                            {
+                                Ok(true) => {
+                                    if let Err(e) = mcservernap::send_starting_message(
+                                        client_socket,
+                                        &app_config,
+                                    )
+                                    .await
+                                    {
+                                        log::warn!("Failed to notify {}: {}", peer, e);
+                                    }
+
+                                    // Transition to starting state
+                                    *state_guard = ServerState::Starting;
+                                    log::debug!("Server state set to Starting in main()");
+
+                                    let mut child = launch_server(&cmd, &arg_slices)?;
+
+                                    let rcon_addr_clone = rcon_addr.clone();
+                                    let rcon_pass_clone = rcon_pass.clone();
+                                    let server_state_for_rcon_watchdog = server_state.clone();
+                                    let rcon_watchdog_handle = tokio::spawn(async move {
+                                        if let Err(e) = idle_watchdog_rcon(
+                                            &rcon_addr_clone,
+                                            &rcon_pass_clone,
+                                            Duration::from_secs(app_config.rcon_poll_interval), // check interval
+                                            Duration::from_secs(app_config.rcon_idle_timeout), // idle timeout
+                                            server_state_for_rcon_watchdog,
+                                        )
+                                        .await
+                                        {
+                                            log::error!("Idle watchdog error: {}", e);
+                                        }
+                                    });
+
+                                    let server_state_for_server_exit = server_state.clone();
+                                    tokio::spawn(async move {
+                                        // Wait for server exit
+                                        match child.wait().await {
+                                            Ok(_) => (),
+                                            Err(e) => log::error!(
+                                                "Failed to wait for server exit: {:?}",
+                                                e
+                                            ),
+                                        }
+
+                                        rcon_watchdog_handle.abort();
+                                        log::info!(
+                                            "RCON watchdog aborted due to manual server exit."
+                                        );
+
+                                        let mut state = server_state_for_server_exit.lock().await;
+                                        *state = ServerState::Stopped;
+                                        log::debug!(
+                                            "Server state set to Stopped after server exit in main()"
+                                        );
+                                        log::info!(
+                                            "Server stopped. Restarting listener for next connection..."
+                                        );
+                                    });
+
+                                    true
+                                }
+                                Ok(false) => false, // Not a login handshake, ignore
+                                Err(_) => false,    // Wait for next connection
+                            }
+                        }
+                        ServerState::Starting => {
+                            // Keep notifying the player client that the server is starting
+                            match verify_handshake_packet(&mut client_socket, peer, &app_config)
+                                .await
+                            {
+                                Ok(true) => {
+                                    if let Err(e) = mcservernap::send_starting_message(
+                                        client_socket,
+                                        &app_config,
+                                    )
+                                    .await
+                                    {
+                                        log::warn!(
+                                            "Failed to notify {} while starting server: {}",
+                                            peer,
+                                            e
+                                        );
+                                    }
+
+                                    true
+                                }
+                                Ok(false) => false,
+                                Err(_) => false,
+                            }
+                        }
+                        ServerState::Running => {
+                            // Server is running: proxy connection to actual Minecraft server
+                            log::info!("Proxying connection for {}", peer);
+                            tokio::spawn(async move {
+                                let server_addr = format!("127.0.0.1:{}", server_port);
+                                match TcpStream::connect(server_addr).await {
+                                    Ok(mut server_socket) => {
+                                        server_socket.set_nodelay(true).unwrap();
+                                        match tokio::io::copy_bidirectional(
+                                            &mut client_socket,
+                                            &mut server_socket,
+                                        )
+                                        .await
+                                        {
+                                            Ok((read, written)) => {
+                                                log::debug!(
+                                                    "Proxy successful for {}: read {} bytes, wrote {}",
+                                                    peer,
+                                                    read,
+                                                    written
+                                                );
+                                            }
+                                            Err(e) => {
+                                                log::error!("Proxy error for {}: {:?}", peer, e);
+                                            }
+                                        }
+
+                                        // Attempt graceful shutdown of sockets
+                                        if let Err(e) = client_socket.shutdown().await {
+                                            log::warn!(
+                                                "Failed to shutdown client socket for {}: {:?}",
+                                                peer,
+                                                e
+                                            );
+                                        }
+                                        if let Err(e) = server_socket.shutdown().await {
+                                            log::warn!(
+                                                "Failed to shutdown server socket for {}: {:?}",
+                                                peer,
+                                                e
+                                            );
+                                        }
+                                    }
+                                    Err(e) => {
+                                        log::error!(
+                                            "Failed to connect to Minecraft server for {}: {:?}",
+                                            peer,
+                                            e
+                                        );
+                                    }
                                 }
                             });
-
-                            // Wait for server exit
-                            match child.wait() {
-                                Ok(_) => log::info!("Server exited"),
-                                Err(e) => log::error!("Failed to wait: {:?}", e),
-                            }
-                            server_running.store(false, Ordering::SeqCst);
-                            log::info!(
-                                "Server stopped. Restarting listener for next connection..."
-                            );
-                        } else {
-                            // Server is running:
-                            // (Maybe forward the raw TCP to the actual server, to proxy direct connections)
-                            log::info!("Server running; player client should retry.");
-                            // Close socket if not proxying, or handle connection if proxying.
-                            socket.shutdown().await?;
+                            true
                         }
                     }
-                    Ok(false) => continue, // Not a login handshake, ignore
-                    Err(_) => continue,    // Wait for next connection
+                };
+
+                if !client_handled {
+                    // Connection ignored, just drop socket and continue accepting
+                    log::debug!(
+                        "Connection from {} ignored (not login handshake or not handled)",
+                        peer
+                    );
                 }
             }
         }
