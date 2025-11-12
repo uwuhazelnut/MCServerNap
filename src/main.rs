@@ -59,7 +59,7 @@ enum Commands {
 async fn main() -> Result<()> {
     // Initialise logger
     env_logger::Builder::from_default_env()
-        .filter_level(log::LevelFilter::Debug) // !!! CHANGE THIS BACK TO INFO BEFORE RELEASE !!!
+        .filter_level(log::LevelFilter::Info) // !!! CHANGE THIS BACK TO INFO BEFORE RELEASE !!!
         .init();
 
     let cli = Cli::parse();
