@@ -191,7 +191,16 @@ pub async fn idle_watchdog_rcon(
             Err(err) => {
                 {
                     // Exclusively scoping all Mutex locks, even if it's not strictly necessary
-                    let mut state = server_state.lock().await;
+                    let mut state =
+                        match tokio::time::timeout(Duration::from_secs(5), server_state.lock())
+                            .await
+                        {
+                            Ok(guard) => guard,
+                            Err(_) => {
+                                log::error!("Deadlock detected! Failed to acquire state lock");
+                                panic!("State lock timeout - possible deadlock");
+                            }
+                        };
                     *state = ServerState::Stopped;
                     log::debug!("Server state set to Stopped in idle_watchdog_rcon()");
                 }
@@ -203,7 +212,14 @@ pub async fn idle_watchdog_rcon(
     let mut conn = conn;
     log::info!("Successfully connected to RCON at {}", rcon_addr);
     {
-        let mut state = server_state.lock().await;
+        let mut state =
+            match tokio::time::timeout(Duration::from_secs(5), server_state.lock()).await {
+                Ok(guard) => guard,
+                Err(_) => {
+                    log::error!("Deadlock detected! Failed to acquire state lock");
+                    panic!("State lock timeout - possible deadlock");
+                }
+            };
         *state = ServerState::Running;
         log::debug!("Server state set to Running in idle_watchdog_rcon()");
     }
@@ -234,7 +250,16 @@ pub async fn idle_watchdog_rcon(
                 Err(e) => {
                     log::error!("RCON connection error: {}. Stopping RCON watchdog.", e);
                     {
-                        let mut state = server_state.lock().await;
+                        let mut state =
+                            match tokio::time::timeout(Duration::from_secs(5), server_state.lock())
+                                .await
+                            {
+                                Ok(guard) => guard,
+                                Err(_) => {
+                                    log::error!("Deadlock detected! Failed to acquire state lock");
+                                    panic!("State lock timeout - possible deadlock");
+                                }
+                            };
                         *state = ServerState::Stopped;
                         log::debug!("Server state set to Stopped in idle_watchdog_rcon()");
                     }

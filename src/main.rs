@@ -104,7 +104,15 @@ async fn main() -> Result<()> {
                     log::info!("Shutdown signal received (Ctrl+C)");
 
                     // Check if server is running and send stop command
-                    let state_guard = server_state_shutdown.lock().await;
+                    let state_guard = match tokio::time::timeout(Duration::from_secs(5), server_state_shutdown.lock()).await {
+                        Ok(guard) => guard,
+                        Err(_) => {
+                            log::error!("Deadlock detected! Failed to acquire state lock");
+                            // Panicking here since we can't safely proceed
+                            panic!("State lock timeout - possible deadlock");
+                        }
+                    };
+
                     if *state_guard == ServerState::Running {
                         log::info!("Stopping Minecraft server gracefully...");
                         drop(state_guard); // Release Mutex lock before RCON call
@@ -152,7 +160,15 @@ async fn main_loop(
 
         let client_handled = {
             // Scoped to hold the Mutex lock only while checking and possibly updating state
-            let mut state_guard = server_state.lock().await;
+            
+            let mut state_guard =
+                match tokio::time::timeout(Duration::from_secs(5), server_state.lock()).await {
+                    Ok(guard) => guard,
+                    Err(_) => {
+                        log::error!("Deadlock detected! Failed to acquire state lock");
+                        panic!("State lock timeout - possible deadlock");
+                    }
+                };
 
             match *state_guard {
                 ServerState::Stopped => {
@@ -202,7 +218,20 @@ async fn main_loop(
                                 log::info!("RCON watchdog aborted");
 
                                 {
-                                    let mut state = server_state_for_server_exit.lock().await;
+                                    let mut state = match tokio::time::timeout(
+                                        Duration::from_secs(5),
+                                        server_state_for_server_exit.lock(),
+                                    )
+                                    .await
+                                    {
+                                        Ok(guard) => guard,
+                                        Err(_) => {
+                                            log::error!(
+                                                "Deadlock detected! Failed to acquire state lock"
+                                            );
+                                            panic!("State lock timeout - possible deadlock");
+                                        }
+                                    };
                                     *state = ServerState::Stopped;
                                 }
                                 log::debug!(
