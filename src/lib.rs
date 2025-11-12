@@ -317,7 +317,11 @@ pub async fn send_starting_message(mut socket: TcpStream, config: &Config) -> Re
     write_varint(packet_data.len() as i32, &mut packet);
     packet.extend_from_slice(&packet_data);
 
-    socket.write_all(&packet).await?;
+    match tokio::time::timeout(std::time::Duration::from_secs(5), socket.write_all(&packet)).await {
+        Ok(Ok(())) => (),
+        Ok(Err(e)) => log::warn!("Sending starting message to client failed: {:?}", e),
+        Err(_) => log::warn!("Sending starting message to client timed out"),
+    }
 
     // Wait a short moment to let client consume data (required because otherwise client doesn't display json message)
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
@@ -329,7 +333,10 @@ pub async fn send_starting_message(mut socket: TcpStream, config: &Config) -> Re
 async fn handle_status_ping(socket: &mut TcpStream, config: &Config) -> Result<()> {
     // Read and discard the next packet (packet ID 0, status request)
     let mut buf = [0u8; 512];
-    let _n = socket.read(&mut buf).await?;
+    match tokio::time::timeout(std::time::Duration::from_secs(5), socket.read(&mut buf)).await {
+        Ok(_) => (),
+        Err(_) => log::warn!("Reading TcpStream timed out(handle_status_ping)"),
+    }
 
     // Create custom MOTD JSON
     // Protocol is "an integer used to check for incompatibilities between the player's client and the server
@@ -374,7 +381,11 @@ async fn handle_status_ping(socket: &mut TcpStream, config: &Config) -> Result<(
     packet.extend_from_slice(&data);
 
     // Send to client
-    socket.write_all(&packet).await?;
+    match tokio::time::timeout(std::time::Duration::from_secs(5), socket.write_all(&packet)).await {
+        Ok(Ok(())) => (),
+        Ok(Err(e)) => log::warn!("Sending MOTD to client failed: {:?}", e),
+        Err(_) => log::warn!("Sending MOTD to client timed out"),
+    }
     socket.shutdown().await?;
     Ok(())
 }
