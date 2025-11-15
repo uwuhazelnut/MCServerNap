@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::fs::{File, OpenOptions};
 use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct Config {
@@ -68,14 +68,23 @@ pub fn get_config() -> Config {
 
     // If an old config with a different directory name is found, migrate it
     if let (Some(old_cfg), Some(old_dir)) = (&old_config, &old_config_dir) {
-        if old_cfg.config_directory_name != *old_dir && Path::new(old_dir).exists() {
+        // Normalize directory names for comparison
+        let old_dir_normalized = PathBuf::from(&old_dir)
+            .canonicalize()
+            .unwrap_or_else(|_| PathBuf::from(&old_dir));
+
+        let new_dir_normalized = PathBuf::from(&old_cfg.config_directory_name)
+            .canonicalize()
+            .unwrap_or_else(|_| PathBuf::from(&old_cfg.config_directory_name));
+
+        if old_dir_normalized != new_dir_normalized && Path::new(&old_dir_normalized).exists() {
             log::info!(
                 "Found old configuration directory '{}'. Migrating to '{}'.",
-                old_dir,
-                old_cfg.config_directory_name
+                old_dir_normalized.display(),
+                new_dir_normalized.display()
             );
 
-            fs::rename(old_dir, &old_cfg.config_directory_name)
+            fs::rename(&old_dir_normalized, &new_dir_normalized)
                 .expect("Failed to migrate config directory");
         }
     }
@@ -111,9 +120,7 @@ pub fn get_config() -> Config {
                 .save(&icon_path)
                 .expect("Failed to save resized server-icon.png");
 
-            config.server_icon = Some(convert_servericon_to_base64(
-                &icon_path,
-            ));
+            config.server_icon = Some(convert_servericon_to_base64(&icon_path));
         }
         Err(_) => {
             log::info!(
