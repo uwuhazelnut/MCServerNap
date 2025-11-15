@@ -123,6 +123,7 @@ Configuration Options:
 * **Message of the day (MOTD)**: The message shown to the user in the server browser menu. set via `motd_text`, `motd_color` and `motd_bold`
 * **Connection Message**: The message shown to the user when they try to connect. Set via `connection_msg_text`, `connection_msg_color` and `connection_msg_bold`
 * **Server Icon**: The icon of the server within the server browser menu. Set by inserting a `.png` file in the `config/` folder with the name `server-icon.png`. The image must be 64x64 pixels big. If it's not, this application will automatically resize the image to meet this requirement
+* **Configuration Directory**: The location of the `cfg.toml` can be changed from the standard `config/` directory by editing the value of `config_directory_name`. This will delete the previous directory and move the files to the new one
 
 ## Contributing
 
