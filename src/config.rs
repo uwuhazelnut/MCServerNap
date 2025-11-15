@@ -112,7 +112,7 @@ pub fn get_config() -> Config {
                 .expect("Failed to save resized server-icon.png");
 
             config.server_icon = Some(convert_servericon_to_base64(
-                config.config_directory_name.as_str(),
+                &icon_path,
             ));
         }
         Err(_) => {
