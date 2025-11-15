@@ -69,13 +69,16 @@ mcservernap <COMMAND> [OPTIONS]
 | `--rcon-port`   | Port for the server’s RCON interface                                   | Yes      |
 | `--rcon-pass`   | Password for RCON authentication                                       | Yes      |
 
+> [!IMPORTANT]
+> When not using a script and instead executing a command with its own arguments, you need to append the command to the end of the line followed by `--` and all the arguments of the command. See below for an example!
+
 > [!NOTE]
 > The port of the Minecraft server does not require port forwarding, only the port of this application.
 
 #### Example
 
 ```bash
-mcservernap listen 0.0.0.0 25565 java -Xmx5G -Xms5G -jar server.jar nogui --server-port 25566 --rcon-port 25575 --rcon-pass rconpasswordmeow
+mcservernap listen 0.0.0.0 25565 --server-port 25566 --rcon-port 25575 --rcon-pass rconpasswordmeow java -- -Xmx5G -Xms5G -jar server.jar nogui
 ```
 
 #### Script Example
