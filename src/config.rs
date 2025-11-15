@@ -20,6 +20,7 @@ pub struct Config {
     pub connection_msg_text: String,
     pub connection_msg_color: String,
     pub connection_msg_bold: bool,
+    config_directory_name: String,
 }
 
 impl Default for Config {
@@ -35,43 +36,90 @@ impl Default for Config {
                 .to_string(),
             connection_msg_color: "light_purple".to_string(),
             connection_msg_bold: true,
+            config_directory_name: "config".to_string(),
         }
     }
 }
 
 pub fn get_config() -> Config {
-    let config_dir = "config";
-    let config_path = "config/cfg.toml";
+    let mut config = Config::default();
+
+    // Search subdirectories for cfg.toml
+    let mut old_config: Option<Config> = None;
+    let mut old_config_dir: Option<String> = None;
+    if let Ok(entries) = fs::read_dir(".") {
+        for entry in entries.flatten() {
+            let path = entry.path();
+
+            if path.is_dir() {
+                let config_file = path.join("cfg.toml");
+                if config_file.exists() {
+                    if let Ok(contents) = fs::read_to_string(&config_file) {
+                        if let Ok(parsed_config) = toml::from_str::<Config>(&contents) {
+                            old_config = Some(parsed_config);
+                            old_config_dir = path.to_str().map(|s| s.to_string());
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // If an old config with a different directory name is found, migrate it
+    if let (Some(old_cfg), Some(old_dir)) = (&old_config, &old_config_dir) {
+        if old_cfg.config_directory_name != *old_dir && Path::new(old_dir).exists() {
+            log::info!(
+                "Found old configuration directory '{}'. Migrating to '{}'.",
+                old_dir,
+                old_cfg.config_directory_name
+            );
+
+            fs::rename(old_dir, &old_cfg.config_directory_name)
+                .expect("Failed to migrate config directory");
+        }
+    }
+
+    if let Some(old_cfg) = old_config {
+        config = old_cfg;
+    }
+
+    let config_dir = config.config_directory_name.as_str();
+    let config_path = format!("{}/cfg.toml", config_dir);
     // Create config directory if it doesn't exist
     if !Path::new(config_dir).exists() {
         log::info!("No configuration directory found. Creating configuration directory.");
         fs::create_dir(config_dir).expect("Cannot create config directory");
     }
 
-    let mut config = Config::default();
-
-    match fs::read_to_string(config_path) {
-        Ok(contents) => config = toml::from_str(&contents).unwrap_or_else(|_| Config::default()),
+    match fs::read_to_string(&config_path) {
+        Ok(contents) => config = toml::from_str::<Config>(&contents).unwrap_or_default(),
         Err(_) => {
             log::info!(
                 "No configuration file found. Creating default configuration file at {}.",
                 config_path
             );
-            File::create(config_path).expect("Cannot create config file");
+            File::create(&config_path).expect("Cannot create config file");
         }
     };
 
-    match resize_image_to_64x64() {
+    let icon_path = format!("{}/server-icon.png", config.config_directory_name);
+    match resize_image_to_64x64(&icon_path) {
         Ok(resized_image) => {
             // Save resized image back to server-icon.png
             resized_image
-                .save("config/server-icon.png")
+                .save(&icon_path)
                 .expect("Failed to save resized server-icon.png");
 
-            config.server_icon = Some(convert_servericon_to_base64());
+            config.server_icon = Some(convert_servericon_to_base64(
+                &icon_path,
+            ));
         }
         Err(_) => {
-            log::info!("No server-icon.png found in config/ directory.");
+            log::info!(
+                "No server-icon.png found in {}/ directory.",
+                config.config_directory_name
+            );
             config.server_icon = None;
         }
     };
@@ -79,7 +127,7 @@ pub fn get_config() -> Config {
     let mut file = OpenOptions::new()
         .write(true)
         .truncate(true)
-        .open(config_path)
+        .open(&config_path)
         .expect("Cannot open config file for writing");
 
     let toml_str = toml::to_string_pretty(&config).unwrap();
@@ -88,8 +136,8 @@ pub fn get_config() -> Config {
     return config;
 }
 
-fn resize_image_to_64x64() -> Result<DynamicImage> {
-    let img = image::open("config/server-icon.png")?;
+fn resize_image_to_64x64(path: &str) -> Result<DynamicImage> {
+    let img = image::open(path)?;
     let (width, height) = img.dimensions();
     if width == 64 && height == 64 {
         return Ok(img); // Return original image if size is already 64x64
@@ -97,8 +145,8 @@ fn resize_image_to_64x64() -> Result<DynamicImage> {
     return Ok(img.resize_exact(64, 64, FilterType::CatmullRom));
 }
 
-fn convert_servericon_to_base64() -> String {
-    let image_bytes = fs::read("config/server-icon.png").expect("Failed to read server-icon.png");
+fn convert_servericon_to_base64(path: &str) -> String {
+    let image_bytes = fs::read(path).expect("Failed to read server-icon.png");
     let image_base64 = general_purpose::STANDARD.encode(&image_bytes);
     return image_base64;
 }
