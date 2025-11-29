@@ -8,6 +8,7 @@ use serde_json::{Value, json};
 use std::io::ErrorKind;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::sync::LazyLock;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::sync::Mutex;
@@ -20,6 +21,9 @@ pub enum ServerState {
     Starting,
     Running,
 }
+
+static PLAYER_COUNT_RE: LazyLock<Regex> =
+    LazyLock::new(|| return Regex::new(r"There are (\d+) of a max").unwrap());
 
 /// Read a VarInt (Minecraft format) from the buffer, returning (value, bytes_read). Returns None if malformed
 fn read_varint(buf: &[u8]) -> Option<(i32, usize)> {
@@ -225,7 +229,6 @@ pub async fn idle_watchdog_rcon(
     }
 
     // Polling loop
-    let player_count_re = Regex::new(r"There are (\d+) of a max").unwrap();
     let mut ticker = interval(poll_interval);
     let mut last_online = Instant::now();
     let mut consecutive_errors = 0;
@@ -269,7 +272,7 @@ pub async fn idle_watchdog_rcon(
         };
         log::info!("RCON list response: {}", response);
 
-        let count = player_count_re
+        let count = PLAYER_COUNT_RE
             .captures(&response)
             .and_then(|caps| caps.get(1))
             .and_then(|m| m.as_str().parse::<u32>().ok())
