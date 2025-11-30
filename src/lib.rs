@@ -1,10 +1,10 @@
 pub mod config;
+pub mod preserialized_packets;
 
-use crate::config::Config;
+use crate::preserialized_packets::PreserializedPackets;
 use anyhow::Result;
 use rcon::Connection;
 use regex::Regex;
-use serde_json::{Value, json};
 use std::io::ErrorKind;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -60,7 +60,7 @@ pub fn write_varint(mut val: i32, buf: &mut Vec<u8>) {
 pub async fn verify_handshake_packet(
     socket: &mut TcpStream,
     peer: SocketAddr,
-    config: &Config,
+    packets: &PreserializedPackets,
 ) -> Result<bool> {
     // 1) Read initial data, ignoring resets or immediate closes
     let mut buf = [0u8; 512];
@@ -132,7 +132,7 @@ pub async fn verify_handshake_packet(
     if let Some((next_state, _)) = read_varint(&buf[offset..n]) {
         if next_state == 1 {
             // Status ping
-            handle_status_ping(socket, &config).await?;
+            handle_status_ping(socket, &packets).await?;
             return Ok(false);
         } else if next_state == 2 {
             // Login handshake
@@ -301,26 +301,16 @@ pub async fn send_stop_command(rcon_addr: &str, rcon_pass: &str) -> Result<()> {
     Ok(())
 }
 
-pub async fn send_starting_message(mut socket: TcpStream, config: &Config) -> Result<()> {
-    let json_msg = json!({
-        "text": config.connection_msg_text,
-        "color": config.connection_msg_color,
-        "bold": config.connection_msg_bold
-    })
-    .to_string();
-    let mut packet_data = Vec::new();
-
-    //Packet ID 0x00 (login disconnect)
-    write_varint(0, &mut packet_data);
-
-    write_varint(json_msg.len() as i32, &mut packet_data);
-    packet_data.extend_from_slice(json_msg.as_bytes());
-
-    let mut packet = Vec::new();
-    write_varint(packet_data.len() as i32, &mut packet);
-    packet.extend_from_slice(&packet_data);
-
-    match tokio::time::timeout(std::time::Duration::from_secs(5), socket.write_all(&packet)).await {
+pub async fn send_starting_message(
+    mut socket: TcpStream,
+    packets: &PreserializedPackets,
+) -> Result<()> {
+    match tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        socket.write_all(&packets.starting_message_packet),
+    )
+    .await
+    {
         Ok(Ok(())) => (),
         Ok(Err(e)) => log::warn!("Sending starting message to client failed: {:?}", e),
         Err(_) => log::warn!("Sending starting message to client timed out"),
@@ -333,7 +323,7 @@ pub async fn send_starting_message(mut socket: TcpStream, config: &Config) -> Re
     Ok(())
 }
 
-async fn handle_status_ping(socket: &mut TcpStream, config: &Config) -> Result<()> {
+async fn handle_status_ping(socket: &mut TcpStream, packets: &PreserializedPackets) -> Result<()> {
     // Read and discard the next packet (packet ID 0, status request)
     let mut buf = [0u8; 512];
     match tokio::time::timeout(std::time::Duration::from_secs(5), socket.read(&mut buf)).await {
@@ -341,50 +331,13 @@ async fn handle_status_ping(socket: &mut TcpStream, config: &Config) -> Result<(
         Err(_) => log::warn!("Reading TcpStream timed out(handle_status_ping)"),
     }
 
-    // Create custom MOTD JSON
-    // Protocol is "an integer used to check for incompatibilities between the player's client and the server
-    // they are trying to connect to.". 766 = Minecraft 1.20.5 (https://minecraft.fandom.com/wiki/Protocol_version)
-    let mut motd_json_obj = json!({
-        "version": {
-            "name": "MCServerNap (1.20.5)",
-            "protocol": 766
-        },
-        "players": {
-            "max": 0,
-            "online": 0,
-            "sample": []
-        },
-        "description": {
-            "text": config.motd_text,
-            "color": config.motd_color,
-            "bold": config.motd_bold
-        }
-    });
-
-    if let Some(server_icon_base64) = config.server_icon.as_ref() {
-        if let Value::Object(ref mut map) = motd_json_obj {
-            map.insert(
-                "favicon".to_string(),
-                Value::String(format!("data:image/png;base64,{}", server_icon_base64)),
-            );
-        }
-    }
-
-    let motd_json = motd_json_obj.to_string();
-
-    // Create status response packet
-    let mut data = Vec::new();
-    // Packet ID = 0 (status response)
-    write_varint(0, &mut data);
-    write_varint(motd_json.len() as i32, &mut data);
-    data.extend_from_slice(motd_json.as_bytes());
-
-    let mut packet = Vec::new();
-    write_varint(data.len() as i32, &mut packet);
-    packet.extend_from_slice(&data);
-
     // Send to client
-    match tokio::time::timeout(std::time::Duration::from_secs(5), socket.write_all(&packet)).await {
+    match tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        socket.write_all(&packets.motd_packet),
+    )
+    .await
+    {
         Ok(Ok(())) => (),
         Ok(Err(e)) => log::warn!("Sending MOTD to client failed: {:?}", e),
         Err(_) => log::warn!("Sending MOTD to client timed out"),

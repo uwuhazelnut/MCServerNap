@@ -10,7 +10,8 @@ use tokio::time::Duration;
 // Import core functions from the library crate
 use mcservernap::config;
 use mcservernap::{
-    ServerState, idle_watchdog_rcon, launch_server, send_stop_command, verify_handshake_packet,
+    ServerState, idle_watchdog_rcon, launch_server, preserialized_packets::PreserializedPackets,
+    send_stop_command, verify_handshake_packet,
 };
 
 /// "Serverless" Minecraft Server Watcher
@@ -80,6 +81,7 @@ async fn main() -> Result<()> {
 
             let server_state = Arc::new(Mutex::new(ServerState::Stopped));
             let app_config: config::Config = config::get_config();
+            let preserialized_packets = PreserializedPackets::new(&app_config);
             let listener = TcpListener::bind(addr).await?;
 
             log::info!("Listening for login on {}", addr);
@@ -98,7 +100,8 @@ async fn main() -> Result<()> {
                     rcon_addr,
                     rcon_pass,
                     server_state,
-                    app_config
+                    app_config,
+                    preserialized_packets
                 ) => {},
                 _ = tokio::signal::ctrl_c() => {
                     log::info!("Shutdown signal received (Ctrl+C)");
@@ -148,6 +151,7 @@ async fn main_loop(
     rcon_pass: Arc<String>,
     server_state: Arc<Mutex<ServerState>>,
     app_config: config::Config,
+    preserialized_packets: PreserializedPackets,
 ) -> Result<()> {
     let arg_slices: Vec<&str> = args.iter().map(String::as_str).collect();
 
@@ -176,13 +180,17 @@ async fn main_loop(
                     match *state_guard {
                         ServerState::Stopped => {
                             // Start the server and RCON watchdog
-                            match verify_handshake_packet(&mut client_socket, peer, &app_config)
-                                .await
+                            match verify_handshake_packet(
+                                &mut client_socket,
+                                peer,
+                                &preserialized_packets,
+                            )
+                            .await
                             {
                                 Ok(true) => {
                                     if let Err(e) = mcservernap::send_starting_message(
                                         client_socket,
-                                        &app_config,
+                                        &preserialized_packets,
                                     )
                                     .await
                                     {
@@ -261,13 +269,17 @@ async fn main_loop(
                         }
                         ServerState::Starting => {
                             // Keep notifying the player client that the server is starting
-                            match verify_handshake_packet(&mut client_socket, peer, &app_config)
-                                .await
+                            match verify_handshake_packet(
+                                &mut client_socket,
+                                peer,
+                                &preserialized_packets,
+                            )
+                            .await
                             {
                                 Ok(true) => {
                                     if let Err(e) = mcservernap::send_starting_message(
                                         client_socket,
-                                        &app_config,
+                                        &preserialized_packets,
                                     )
                                     .await
                                     {
