@@ -60,7 +60,7 @@ enum Commands {
 async fn main() -> Result<()> {
     // Initialise logger
     env_logger::Builder::from_default_env()
-        .filter_level(log::LevelFilter::Info) // !!! CHANGE THIS BACK TO INFO BEFORE RELEASE !!!
+        .filter_level(log::LevelFilter::Debug) // !!! CHANGE THIS BACK TO INFO BEFORE RELEASE !!!
         .init();
 
     let cli = Cli::parse();
@@ -107,7 +107,7 @@ async fn main() -> Result<()> {
                     log::info!("Shutdown signal received (Ctrl+C)");
 
                     // Check if server is running and send stop command
-                    let state_guard = match tokio::time::timeout(Duration::from_secs(5), server_state_shutdown.lock()).await {
+                    let mut state_guard = match tokio::time::timeout(Duration::from_secs(5), server_state_shutdown.lock()).await {
                         Ok(guard) => guard,
                         Err(_) => {
                             log::error!("Deadlock detected! Failed to acquire state lock");
@@ -118,6 +118,7 @@ async fn main() -> Result<()> {
 
                     if *state_guard == ServerState::Running {
                         log::info!("Stopping Minecraft server gracefully...");
+                        state_guard.switch_to(ServerState::Stopped)?;
                         drop(state_guard); // Release Mutex lock before RCON call
 
                         if let Err(e) = send_stop_command(&rcon_addr_shutdown, &rcon_pass_shutdown).await {
@@ -198,8 +199,7 @@ async fn main_loop(
                                     }
 
                                     // Transition to starting state
-                                    *state_guard = ServerState::Starting;
-                                    log::debug!("Server state set to Starting in main()");
+                                    state_guard.switch_to(ServerState::Starting)?;
 
                                     let mut child = launch_server(&cmd, &arg_slices)?;
 
@@ -253,11 +253,8 @@ async fn main_loop(
                                                     );
                                                 }
                                             };
-                                            *state = ServerState::Stopped;
+                                            state.switch_to(ServerState::Stopped)?;
                                         }
-                                        log::debug!(
-                                            "Server state set to Stopped after server exit in main()"
-                                        );
                                         log::info!("Server stopped.");
                                     });
 

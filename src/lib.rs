@@ -22,6 +22,30 @@ pub enum ServerState {
     Running,
 }
 
+impl ServerState {
+    pub fn switch_to(&mut self, new_state: ServerState) -> Result<()> {
+        let valid_switch = match (*self, new_state) {
+            (ServerState::Stopped, ServerState::Starting) => true,
+            (ServerState::Starting, ServerState::Running) => true,
+            (ServerState::Starting, ServerState::Stopped) => true,
+            (ServerState::Running, ServerState::Stopped) => true,
+            _ => false,
+        };
+
+        if valid_switch {
+            log::debug!("Switching state: {:?} → {:?}", self, new_state);
+            *self = new_state;
+            return Ok(());
+        }
+
+        return Err(anyhow::anyhow!(
+            "Invalid state transition: {:?} → {:?}",
+            self,
+            new_state
+        ));
+    }
+}
+
 static PLAYER_COUNT_RE: LazyLock<Regex> =
     LazyLock::new(|| return Regex::new(r"There are (\d+) of a max").unwrap());
 
@@ -205,8 +229,7 @@ pub async fn idle_watchdog_rcon(
                                 panic!("State lock timeout - possible deadlock");
                             }
                         };
-                    *state = ServerState::Stopped;
-                    log::debug!("Server state set to Stopped in idle_watchdog_rcon()");
+                    state.switch_to(ServerState::Stopped)?;
                 }
                 return Err(err.into());
             }
@@ -224,7 +247,7 @@ pub async fn idle_watchdog_rcon(
                     panic!("State lock timeout - possible deadlock");
                 }
             };
-        *state = ServerState::Running;
+        state.switch_to(ServerState::Running)?;
         log::debug!("Server state set to Running in idle_watchdog_rcon()");
     }
 
@@ -263,8 +286,7 @@ pub async fn idle_watchdog_rcon(
                                     panic!("State lock timeout - possible deadlock");
                                 }
                             };
-                        *state = ServerState::Stopped;
-                        log::debug!("Server state set to Stopped in idle_watchdog_rcon()");
+                        state.switch_to(ServerState::Stopped)?;
                     }
                     return Err(e.into());
                 }
