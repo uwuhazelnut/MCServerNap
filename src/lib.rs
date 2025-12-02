@@ -24,6 +24,11 @@ pub enum ServerState {
 
 impl ServerState {
     pub fn switch_to(&mut self, new_state: ServerState) -> Result<()> {
+        if *self == new_state {
+            log::debug!("State is already {:?}, no need to switch", self);
+            return Ok(());
+        }
+
         let valid_switch = match (*self, new_state) {
             (ServerState::Stopped, ServerState::Starting) => true,
             (ServerState::Starting, ServerState::Running) => true,
@@ -229,7 +234,10 @@ pub async fn idle_watchdog_rcon(
                                 panic!("State lock timeout - possible deadlock");
                             }
                         };
-                    state.switch_to(ServerState::Stopped)?;
+                    match state.switch_to(ServerState::Stopped) {
+                        Ok(_) => (),
+                        Err(e) => log::error!("{}", e),
+                    }
                 }
                 return Err(err.into());
             }
@@ -247,8 +255,10 @@ pub async fn idle_watchdog_rcon(
                     panic!("State lock timeout - possible deadlock");
                 }
             };
-        state.switch_to(ServerState::Running)?;
-        log::debug!("Server state set to Running in idle_watchdog_rcon()");
+        match state.switch_to(ServerState::Running) {
+            Ok(_) => (),
+            Err(e) => log::error!("{}", e),
+        }
     }
 
     // Polling loop
@@ -286,7 +296,10 @@ pub async fn idle_watchdog_rcon(
                                     panic!("State lock timeout - possible deadlock");
                                 }
                             };
-                        state.switch_to(ServerState::Stopped)?;
+                        match state.switch_to(ServerState::Stopped) {
+                            Ok(_) => (),
+                            Err(e) => log::error!("{}", e),
+                        }
                     }
                     return Err(e.into());
                 }

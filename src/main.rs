@@ -118,7 +118,10 @@ async fn main() -> Result<()> {
 
                     if *state_guard == ServerState::Running {
                         log::info!("Stopping Minecraft server gracefully...");
-                        state_guard.switch_to(ServerState::Stopped)?;
+                        match state_guard.switch_to(ServerState::Stopped) {
+                            Ok(_) => (),
+                            Err(e) => log::error!("{}", e),
+                        }
                         drop(state_guard); // Release Mutex lock before RCON call
 
                         if let Err(e) = send_stop_command(&rcon_addr_shutdown, &rcon_pass_shutdown).await {
@@ -199,7 +202,10 @@ async fn main_loop(
                                     }
 
                                     // Transition to starting state
-                                    state_guard.switch_to(ServerState::Starting)?;
+                                    match state_guard.switch_to(ServerState::Starting) {
+                                        Ok(_) => (),
+                                        Err(e) => log::error!("{}", e),
+                                    }
 
                                     let mut child = launch_server(&cmd, &arg_slices)?;
 
@@ -253,7 +259,10 @@ async fn main_loop(
                                                     );
                                                 }
                                             };
-                                            state.switch_to(ServerState::Stopped)?;
+                                            match state.switch_to(ServerState::Stopped) {
+                                                Ok(_) => (),
+                                                Err(e) => log::error!("{}", e),
+                                            }
                                         }
                                         log::info!("Server stopped.");
                                     });
