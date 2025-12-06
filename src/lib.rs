@@ -6,39 +6,58 @@ use anyhow::Result;
 use rcon::Connection;
 use regex::Regex;
 use std::io::ErrorKind;
+use std::mem::discriminant;
 use std::net::SocketAddr;
-use std::sync::Arc;
 use std::sync::LazyLock;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
-use tokio::sync::Mutex;
 use tokio::time::{Duration, Instant, interval, timeout};
 
 /// Basic enum to provide state machine system for server status
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug)]
 pub enum ServerState {
     Stopped,
-    Starting,
-    Running,
+    Starting {
+        child: tokio::process::Child,
+    },
+    Running {
+        child: tokio::process::Child,
+        rcon_watchdog_handle: tokio::task::JoinHandle<()>,
+    },
 }
 
 impl ServerState {
+    fn variant_name(&self) -> &str {
+        match self {
+            ServerState::Stopped => "Stopped",
+            ServerState::Starting { .. } => "Starting",
+            ServerState::Running { .. } => "Running",
+        }
+    }
+
     pub fn switch_to(&mut self, new_state: ServerState) -> Result<()> {
-        if *self == new_state {
-            log::debug!("State is already {:?}, no need to switch", self);
+        if discriminant(self) == discriminant(&new_state) {
+            log::debug!(
+                "State is already {:?}, no need to switch",
+                self.variant_name()
+            );
             return Ok(());
         }
 
-        let valid_switch = match (*self, new_state) {
-            (ServerState::Stopped, ServerState::Starting) => true,
-            (ServerState::Starting, ServerState::Running) => true,
-            (ServerState::Starting, ServerState::Stopped) => true,
-            (ServerState::Running, ServerState::Stopped) => true,
+        let valid_switch = match (&*self, &new_state) {
+            (ServerState::Stopped, ServerState::Starting { .. }) => true,
+            (ServerState::Starting { .. }, ServerState::Running { .. }) => true,
+            (ServerState::Starting { .. }, ServerState::Stopped) => true,
+            (ServerState::Running { .. }, ServerState::Stopped) => true,
             _ => false,
         };
 
         if valid_switch {
-            log::debug!("Switching state: {:?} → {:?}", self, new_state);
+            log::debug!(
+                "Switching state: {:?} → {:?}",
+                self,
+                new_state.variant_name()
+            );
             *self = new_state;
             return Ok(());
         }
@@ -197,6 +216,23 @@ pub fn launch_server(command: &str, args: &[&str]) -> Result<tokio::process::Chi
     }
 }
 
+pub async fn kill_server_process(process: tokio::process::Child) {
+    #[cfg(target_os = "windows")]
+    {
+        let pid = process.id().unwrap();
+        let _ = std::process::Command::new("taskkill")
+            .args(&["/F", "/T", "/PID", &pid.to_string()])
+            .output();
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        if let Err(e) = process.kill().await {
+            log::error!("Failed to kill starting server: {}", e);
+        }
+    }
+}
+
 /// Idle watchdog: polls the RCON `list` command every `poll_interval`.
 /// If no players have been online for `timeout`, send `/stop` via RCON and exit
 pub async fn idle_watchdog_rcon(
@@ -204,7 +240,7 @@ pub async fn idle_watchdog_rcon(
     rcon_pass: &str,
     poll_interval: Duration,
     timeout: Duration,
-    server_state: Arc<Mutex<ServerState>>,
+    ready_signal_sender: tokio::sync::oneshot::Sender<()>,
 ) -> Result<()> {
     log::info!(
         "Starting RCON idle watchdog: polling {} every {:?}",
@@ -222,23 +258,6 @@ pub async fn idle_watchdog_rcon(
                 tokio::time::sleep(Duration::from_secs(1)).await;
             }
             Err(err) => {
-                {
-                    // Exclusively scoping all Mutex locks, even if it's not strictly necessary
-                    let mut state =
-                        match tokio::time::timeout(Duration::from_secs(5), server_state.lock())
-                            .await
-                        {
-                            Ok(guard) => guard,
-                            Err(_) => {
-                                log::error!("Deadlock detected! Failed to acquire state lock");
-                                panic!("State lock timeout - possible deadlock");
-                            }
-                        };
-                    match state.switch_to(ServerState::Stopped) {
-                        Ok(_) => (),
-                        Err(e) => log::error!("{}", e),
-                    }
-                }
                 return Err(err.into());
             }
         }
@@ -246,20 +265,9 @@ pub async fn idle_watchdog_rcon(
 
     let mut conn = conn;
     log::info!("Successfully connected to RCON at {}", rcon_addr);
-    {
-        let mut state =
-            match tokio::time::timeout(Duration::from_secs(5), server_state.lock()).await {
-                Ok(guard) => guard,
-                Err(_) => {
-                    log::error!("Deadlock detected! Failed to acquire state lock");
-                    panic!("State lock timeout - possible deadlock");
-                }
-            };
-        match state.switch_to(ServerState::Running) {
-            Ok(_) => (),
-            Err(e) => log::error!("{}", e),
-        }
-    }
+    ready_signal_sender
+        .send(())
+        .expect("Failed to send RCON ready signal!");
 
     // Polling loop
     let mut ticker = interval(poll_interval);
@@ -285,22 +293,6 @@ pub async fn idle_watchdog_rcon(
                 }
                 Err(e) => {
                     log::error!("RCON connection error: {}. Stopping RCON watchdog.", e);
-                    {
-                        let mut state =
-                            match tokio::time::timeout(Duration::from_secs(5), server_state.lock())
-                                .await
-                            {
-                                Ok(guard) => guard,
-                                Err(_) => {
-                                    log::error!("Deadlock detected! Failed to acquire state lock");
-                                    panic!("State lock timeout - possible deadlock");
-                                }
-                            };
-                        match state.switch_to(ServerState::Stopped) {
-                            Ok(_) => (),
-                            Err(e) => log::error!("{}", e),
-                        }
-                    }
                     return Err(e.into());
                 }
             };

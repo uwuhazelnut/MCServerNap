@@ -10,8 +10,8 @@ use tokio::time::Duration;
 // Import core functions from the library crate
 use mcservernap::config;
 use mcservernap::{
-    ServerState, idle_watchdog_rcon, launch_server, preserialized_packets::PreserializedPackets,
-    send_stop_command, verify_handshake_packet,
+    ServerState, idle_watchdog_rcon, kill_server_process, launch_server,
+    preserialized_packets::PreserializedPackets, send_stop_command, verify_handshake_packet,
 };
 
 /// "Serverless" Minecraft Server Watcher
@@ -116,19 +116,37 @@ async fn main() -> Result<()> {
                         }
                     };
 
-                    if *state_guard == ServerState::Running {
-                        log::info!("Stopping Minecraft server gracefully...");
-                        match state_guard.switch_to(ServerState::Stopped) {
-                            Ok(_) => (),
-                            Err(e) => log::error!("{}", e),
-                        }
-                        drop(state_guard); // Release Mutex lock before RCON call
+                    // Extract child process and kill based on state
+                    match std::mem::replace(&mut *state_guard, ServerState::Stopped) {
+                        ServerState::Starting { child } => {
+                            log::info!("Killing starting server...");
 
-                        if let Err(e) = send_stop_command(&rcon_addr_shutdown, &rcon_pass_shutdown).await {
-                            log::error!("Failed to send stop command: {}", e);
-                        } else {
-                            // Give server time to stop
-                            tokio::time::sleep(Duration::from_secs(10)).await;
+                            kill_server_process(child).await;
+                        }
+                        ServerState::Running { mut child, rcon_watchdog_handle } => {
+                            log::info!("Stopping running server...");
+                            drop(state_guard); // Release lock for RCON call
+
+                            if let Err(e) = send_stop_command(&rcon_addr_shutdown, &rcon_pass_shutdown).await {
+                                log::warn!("RCON stop failed: {}, force killing", e);
+                                kill_server_process(child).await;
+                            } else {
+                                // Wait for graceful shutdown
+                                match tokio::time::timeout(Duration::from_secs(30), child.wait()).await {
+                                    Ok(Ok(_)) => log::info!("Server stopped gracefully"),
+                                    Ok(Err(e)) => log::error!("Wait error: {}", e),
+                                    Err(_) => {
+                                        log::warn!("Graceful stop timeout, force killing");
+                                        let _ = child.kill().await;
+                                    }
+                                }
+                            }
+
+                            // Stop watchdog
+                            rcon_watchdog_handle.abort();
+                        }
+                        ServerState::Stopped => {
+                            log::debug!("CtrlC: Server already stopped");
                         }
                     }
                 }
@@ -201,70 +219,97 @@ async fn main_loop(
                                         log::warn!("Failed to notify {}: {}", peer, e);
                                     }
 
+                                    let child = launch_server(&cmd, &arg_slices)?;
+
                                     // Transition to starting state
-                                    match state_guard.switch_to(ServerState::Starting) {
+                                    match state_guard.switch_to(ServerState::Starting { child }) {
                                         Ok(_) => (),
                                         Err(e) => log::error!("{}", e),
                                     }
 
-                                    let mut child = launch_server(&cmd, &arg_slices)?;
-
+                                    let (ready_tx, ready_rx) =
+                                        tokio::sync::oneshot::channel::<()>();
                                     let rcon_addr_clone = rcon_addr.clone();
                                     let rcon_pass_clone = rcon_pass.clone();
                                     let server_state_for_rcon_watchdog = server_state.clone();
                                     let rcon_watchdog_handle = tokio::spawn(async move {
-                                        if let Err(e) = idle_watchdog_rcon(
+                                        match idle_watchdog_rcon(
                                             &rcon_addr_clone,
                                             &rcon_pass_clone,
                                             Duration::from_secs(app_config.rcon_poll_interval), // check interval
                                             Duration::from_secs(app_config.rcon_idle_timeout), // idle timeout
-                                            server_state_for_rcon_watchdog,
+                                            ready_tx,
                                         )
                                         .await
+                                        .inspect_err(|e| log::error!("Idle watchdog error: {}", e))
                                         {
-                                            log::error!("Idle watchdog error: {}", e);
+                                            Ok(()) | Err(_) => {
+                                                // Exclusively scoping all Mutex locks, even if it's not strictly necessary
+                                                let mut state = match tokio::time::timeout(
+                                                    Duration::from_secs(5),
+                                                    server_state_for_rcon_watchdog.lock(),
+                                                )
+                                                .await
+                                                {
+                                                    Ok(guard) => guard,
+                                                    Err(_) => {
+                                                        log::error!(
+                                                            "Deadlock detected! Failed to acquire state lock"
+                                                        );
+                                                        panic!(
+                                                            "State lock timeout - possible deadlock"
+                                                        );
+                                                    }
+                                                };
+                                                match state.switch_to(ServerState::Stopped) {
+                                                    Ok(_) => (),
+                                                    Err(e) => log::error!("{}", e),
+                                                }
+                                            }
                                         }
                                     });
 
-                                    let server_state_for_server_exit = server_state.clone();
+                                    let server_state_for_rcon_signal = server_state.clone();
                                     tokio::spawn(async move {
-                                        // Wait for server exit
-                                        match child.wait().await {
-                                            Ok(_) => (),
-                                            Err(e) => {
-                                                log::error!(
-                                                    "Failed to wait for server exit: {:?}",
-                                                    e
+                                        match ready_rx.await {
+                                            Ok(_) => {
+                                                let mut state = match tokio::time::timeout(
+                                                    Duration::from_secs(5),
+                                                    server_state_for_rcon_signal.lock(),
                                                 )
-                                            }
-                                        }
+                                                .await
+                                                {
+                                                    Ok(guard) => guard,
+                                                    Err(_) => {
+                                                        log::error!(
+                                                            "Deadlock detected! Failed to acquire state lock"
+                                                        );
+                                                        panic!(
+                                                            "State lock timeout - possible deadlock"
+                                                        );
+                                                    }
+                                                };
 
-                                        rcon_watchdog_handle.abort();
-                                        log::info!("RCON watchdog aborted");
-
-                                        {
-                                            let mut state = match tokio::time::timeout(
-                                                Duration::from_secs(5),
-                                                server_state_for_server_exit.lock(),
-                                            )
-                                            .await
-                                            {
-                                                Ok(guard) => guard,
-                                                Err(_) => {
-                                                    log::error!(
-                                                        "Deadlock detected! Failed to acquire state lock"
-                                                    );
-                                                    panic!(
-                                                        "State lock timeout - possible deadlock"
-                                                    );
-                                                }
-                                            };
-                                            match state.switch_to(ServerState::Stopped) {
-                                                Ok(_) => (),
-                                                Err(e) => log::error!("{}", e),
+                                                *state = match std::mem::replace(
+                                                    &mut *state,
+                                                    ServerState::Stopped,
+                                                ) {
+                                                    ServerState::Starting { child } => {
+                                                        ServerState::Running {
+                                                            child,
+                                                            rcon_watchdog_handle,
+                                                        }
+                                                    }
+                                                    _ => {
+                                                        panic!("Expected to be in Starting state!")
+                                                    }
+                                                };
                                             }
+                                            Err(e) => log::error!(
+                                                "Failed to receive RCON ready signal: {:?}",
+                                                e
+                                            ),
                                         }
-                                        log::info!("Server stopped.");
                                     });
 
                                     true
@@ -273,7 +318,7 @@ async fn main_loop(
                                 Err(_) => false,    // Wait for next connection
                             }
                         }
-                        ServerState::Starting => {
+                        ServerState::Starting { .. } => {
                             // Keep notifying the player client that the server is starting
                             match verify_handshake_packet(
                                 &mut client_socket,
@@ -302,7 +347,7 @@ async fn main_loop(
                                 Err(_) => false,
                             }
                         }
-                        ServerState::Running => {
+                        ServerState::Running { .. } => {
                             // Server is running: proxy connection to actual Minecraft server
                             log::info!("Proxying connection for {}", peer);
                             tokio::spawn(async move {
