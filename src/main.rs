@@ -261,9 +261,29 @@ async fn main_loop(
                                                         );
                                                     }
                                                 };
-                                                match state.switch_to(ServerState::Stopped) {
-                                                    Ok(_) => (),
-                                                    Err(e) => log::error!("{}", e),
+                                                match std::mem::replace(
+                                                    &mut *state,
+                                                    ServerState::Stopped,
+                                                ) {
+                                                    ServerState::Running {
+                                                        mut child,
+                                                        rcon_watchdog_handle: _,
+                                                    } => {
+                                                        // Kill server process if it can't stop gracefully
+                                                        match tokio::time::timeout(
+                                                            Duration::from_secs(30),
+                                                            child.wait(),
+                                                        )
+                                                        .await
+                                                        {
+                                                            Ok(Ok(status)) => log::info!(
+                                                                "Server exited: {:?}",
+                                                                status
+                                                            ),
+                                                            _ => kill_server_process(child).await,
+                                                        }
+                                                    }
+                                                    _ => {}
                                                 }
                                             }
                                         }

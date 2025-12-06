@@ -55,10 +55,18 @@ impl ServerState {
         if valid_switch {
             log::debug!(
                 "Switching state: {:?} → {:?}",
-                self,
+                self.variant_name(),
                 new_state.variant_name()
             );
-            *self = new_state;
+            match std::mem::replace(self, new_state) {
+                ServerState::Running {
+                    child: _,
+                    rcon_watchdog_handle,
+                } => {
+                    rcon_watchdog_handle.abort();
+                }
+                _ => {}
+            }
             return Ok(());
         }
 
