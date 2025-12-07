@@ -283,6 +283,13 @@ async fn main_loop(
                                                             _ => kill_server_process(child).await,
                                                         }
                                                     }
+                                                    // If the state was still "Starting", it means the RCON watchdog failed
+                                                    ServerState::Starting { child } => {
+                                                        log::warn!(
+                                                            "RCON Watchdog failed during startup. Killing server process."
+                                                        );
+                                                        kill_server_process(child).await;
+                                                    }
                                                     _ => {}
                                                 }
                                             }
@@ -328,10 +335,43 @@ async fn main_loop(
                                                     }
                                                 };
                                             }
-                                            Err(e) => log::error!(
-                                                "Failed to receive RCON ready signal: {:?}",
-                                                e
-                                            ),
+                                            Err(e) => {
+                                                log::warn!(
+                                                    "Failed to receive RCON ready signal: {:?}",
+                                                    e
+                                                );
+
+                                                let mut state = match tokio::time::timeout(
+                                                    Duration::from_secs(5),
+                                                    server_state_for_rcon_signal.lock(),
+                                                )
+                                                .await
+                                                {
+                                                    Ok(guard) => guard,
+                                                    Err(_) => {
+                                                        log::error!(
+                                                            "Deadlock detected! Failed to acquire state lock"
+                                                        );
+                                                        panic!(
+                                                            "State lock timeout - possible deadlock"
+                                                        );
+                                                    }
+                                                };
+
+                                                match std::mem::replace(
+                                                    &mut *state,
+                                                    ServerState::Stopped,
+                                                ) {
+                                                    ServerState::Running {
+                                                        child,
+                                                        rcon_watchdog_handle: _,
+                                                    }
+                                                    | ServerState::Starting { child } => {
+                                                        kill_server_process(child).await
+                                                    }
+                                                    _ => {}
+                                                }
+                                            }
                                         }
                                     });
 

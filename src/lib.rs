@@ -6,7 +6,7 @@ use anyhow::Result;
 use rcon::Connection;
 use regex::Regex;
 use std::io::ErrorKind;
-use std::mem::discriminant;
+// use std::mem::discriminant;
 use std::net::SocketAddr;
 use std::sync::LazyLock;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -36,12 +36,28 @@ impl ServerState {
     }
 
     pub fn switch_to(&mut self, new_state: ServerState) -> Result<()> {
+        // Commented out because it's problematic to use because of
+        // potential orphan server processes when dropping the child
+        // process of a new state
+        /*
         if discriminant(self) == discriminant(&new_state) {
             log::debug!(
                 "State is already {:?}, no need to switch",
                 self.variant_name()
             );
             return Ok(());
+        }
+        */
+
+        match (&*self, &new_state) {
+            (ServerState::Stopped, ServerState::Stopped) => {
+                log::debug!(
+                    "State is already {:?}, no need to switch",
+                    ServerState::Stopped.variant_name()
+                );
+                return Ok(());
+            }
+            _ => {}
         }
 
         let valid_switch = match (&*self, &new_state) {
