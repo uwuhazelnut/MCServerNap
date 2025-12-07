@@ -321,7 +321,10 @@ async fn main_loop(
                                                         }
                                                     }
                                                     _ => {
-                                                        panic!("Expected to be in Starting state!")
+                                                        log::error!(
+                                                            "Expected to be in Starting state! Switching to Stopped."
+                                                        );
+                                                        ServerState::Stopped
                                                     }
                                                 };
                                             }
